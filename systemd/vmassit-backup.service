@@ -1,0 +1,20 @@
+[Unit]
+Description=VMassit Database Backup Service
+After=network.target
+
+[Service]
+Type=oneshot
+User=admin
+Group=admin
+WorkingDirectory=/home/admin/.openclaw/workspace/VMassit/VMassit/VMassit
+ExecStart=/home/admin/.openclaw/workspace/VMassit/VMassit/VMassit/scripts/backup_database.sh --retention 30
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/admin/.openclaw/workspace/VMassit/VMassit/VMassit/data
+
+[Install]
+WantedBy=multi-user.target

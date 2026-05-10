@@ -1,0 +1,11 @@
+[Unit]
+Description=VMassit Database Backup Timer
+Requires=vmassit-backup.service
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
