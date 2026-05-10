@@ -4,15 +4,15 @@ Production-ready database management, backup systems, and data portability infra
 
 ## 🎯 Overview
 
-This repository contains enterprise-grade infrastructure components for automated trading systems, providing robust data management, disaster recovery, and monitoring capabilities.
+This repository contains enterprise-grade infrastructure components for automated trading systems, providing robust data management, disaster recovery, and monitoring capabilities. The system is built using a "Zone" architecture to ensure scalability, security, and cost-efficiency.
 
 ## ✨ Features
 
 ### 1. Database Migration System (Alembic)
-- Version-controlled schema management
+- Version-controlled schema management with SQLAlchemy ORM models
 - Safe upgrade/downgrade paths  
 - CLI tool for easy operations
-- SQLite database support with WAL mode
+- SQLite database support with WAL mode and event-driven optimizations
 
 ### 2. Automated Backup/Restore System
 - Compressed daily backups (gzip ~90% space savings)
@@ -32,6 +32,10 @@ This repository contains enterprise-grade infrastructure components for automate
 - Filterable and paginated results
 - Complete data archiving
 
+### 5. Centralized Configuration
+- Type-safe environment variable management via Pydantic Settings
+- Support for `.env` files and production secrets
+
 ## 🚀 Quick Start
 
 ```bash
@@ -40,7 +44,7 @@ git clone <your-repo-url>
 cd auto-trade-system
 python -m venv .venv
 source .venv/bin/activate
-pip install alembic fastapi sqlalchemy
+pip install -r requirements.txt
 
 # Run migrations
 python migrate.py upgrade
@@ -56,6 +60,7 @@ sudo systemctl enable --now vmassit-backup.timer
 
 - **Migrations:** `migrations/README.md`
 - **Backups:** `scripts/BACKUP_RESTORE_README.md`
+- **Optimization Plan:** `OPTIMIZATION_COMPLETE.md`
 - **API Docs:** Available at `/docs` when running FastAPI server
 
 ## 🧪 Testing

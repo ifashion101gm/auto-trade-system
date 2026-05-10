@@ -20,14 +20,14 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Import our database models for autogenerate support
-from app.storage.db import init_db
-from app.storage.models import (
-    save_strategy_parameters,
-    get_active_strategy_parameters,
-    create_backtest_run,
-    record_strategy_performance,
-    create_optimization_run,
-)
+# Note: We are using raw SQL in migrations, so we don't need to import specific models here.
+# from app.storage.models import (
+#     save_strategy_parameters,
+#     get_active_strategy_parameters,
+#     create_backtest_run,
+#     record_strategy_performance,
+#     create_optimization_run,
+# )
 
 # For autogenerate support, we need to import all table definitions
 # Since we're using raw SQL, we'll create a MetaData object manually
