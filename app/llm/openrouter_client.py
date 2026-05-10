@@ -19,22 +19,33 @@ class OpenRouterClient:
     - Risk Assessment: High accuracy models (complex reasoning)
     """
     
-    # Model mapping by agent type
+    # Model mapping by agent type - OPTIMIZED FOR COST
     MODEL_MAPPING = {
         'regime_detection': {
-            'model': 'google/gemini-2.0-flash-lite-001',  # Fast, cheap
+            'model': 'openai/gpt-4o-mini',  # Fast, cheap for simple classification
             'max_tokens': 500,
             'temperature': 0.1
         },
         'strategy_selection': {
-            'model': 'anthropic/claude-3-haiku-20240307',  # Balanced
+            'model': 'openai/gpt-4o-mini',  # Cost-effective for strategy selection
             'max_tokens': 1000,
             'temperature': 0.3
         },
         'risk_assessment': {
-            'model': 'anthropic/claude-3-5-sonnet-20241022',  # High accuracy (updated model ID)
+            'model': 'openai/gpt-4o',  # GPT-4o for high accuracy risk assessment (kept)
             'max_tokens': 1500,
             'temperature': 0.2
+        },
+        # Smart routing models
+        'smart_routing_claude': {
+            'model': 'anthropic/claude-3.5-sonnet',  # Only for high uncertainty
+            'max_tokens': 2000,
+            'temperature': 0.2
+        },
+        'smart_routing_gpt4o_mini': {
+            'model': 'openai/gpt-4o-mini',  # Default for normal cases
+            'max_tokens': 1000,
+            'temperature': 0.3
         }
     }
     
@@ -334,9 +345,9 @@ Respond in JSON format only.
             True if connection successful
         """
         try:
-            # Simple test request
+            # Simple test request using cost-effective model
             result = await self._make_request(
-                model='google/gemini-2.0-flash-lite-001',
+                model='openai/gpt-4o-mini',
                 messages=[{"role": "user", "content": "Say 'OK'"}],
                 max_tokens=10,
                 temperature=0.1
@@ -346,3 +357,96 @@ Respond in JSON format only.
         except Exception as e:
             print(f"❌ OpenRouter connection test failed: {e}")
             return False
+    
+    async def smart_routing_assessment(
+        self,
+        market_data: Dict[str, Any],
+        uncertainty_score: float,
+        pnl_drawdown: float,
+        drawdown_threshold: float = 0.05
+    ) -> Dict[str, Any]:
+        """
+        Smart routing: Use Claude only when needed, otherwise use GPT-4o-mini.
+        
+        Args:
+            market_data: Current market conditions
+            uncertainty_score: Model uncertainty (0-1)
+            pnl_drawdown: Current P&L drawdown percentage
+            drawdown_threshold: Threshold to trigger Claude usage
+            
+        Returns:
+            Decision with selected model and reasoning
+        """
+        # Determine which model to use based on conditions
+        if uncertainty_score > 0.75 or pnl_drawdown > drawdown_threshold:
+            # High uncertainty or significant drawdown - use Claude
+            config = self.MODEL_MAPPING['smart_routing_claude']
+            model_type = 'claude'
+            reason = f"High uncertainty ({uncertainty_score:.2f}) or drawdown ({pnl_drawdown:.2%})"
+        else:
+            # Normal conditions - use GPT-4o-mini for cost savings
+            config = self.MODEL_MAPPING['smart_routing_gpt4o_mini']
+            model_type = 'gpt-4o-mini'
+            reason = f"Normal conditions (uncertainty: {uncertainty_score:.2f}, drawdown: {pnl_drawdown:.2%})"
+        
+        prompt = f"""
+Provide trading decision based on market conditions.
+
+Market Data:
+{json.dumps(market_data, indent=2)}
+
+Uncertainty Score: {uncertainty_score}
+P&L Drawdown: {pnl_drawdown:.2%}
+
+Provide:
+- action: 'BUY', 'SELL', or 'HOLD'
+- confidence: 0.0 to 1.0
+- position_size_usd: recommended position size
+- stop_loss_pct: stop loss percentage
+- reasoning: brief explanation
+
+Respond in JSON format only.
+"""
+        
+        messages = [
+            {"role": "system", "content": "You are a trading decision expert. Respond in JSON format only."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            result = await self._make_request(
+                model=config['model'],
+                messages=messages,
+                max_tokens=config['max_tokens'],
+                temperature=config['temperature']
+            )
+            
+            content = result['choices'][0]['message']['content'].strip()
+            
+            try:
+                decision = json.loads(content)
+            except json.JSONDecodeError:
+                decision = {
+                    'action': 'HOLD',
+                    'confidence': 0.5,
+                    'position_size_usd': 500,
+                    'stop_loss_pct': 0.02,
+                    'reasoning': 'Fallback decision'
+                }
+            
+            decision['model_used'] = model_type
+            decision['routing_reason'] = reason
+            
+            return decision
+            
+        except Exception as e:
+            print(f"⚠️  Smart routing assessment failed: {e}")
+            return {
+                'action': 'HOLD',
+                'confidence': 0.5,
+                'position_size_usd': 500,
+                'stop_loss_pct': 0.02,
+                'reasoning': f'Error: {str(e)}',
+                'model_used': 'fallback',
+                'routing_reason': 'Error fallback'
+            }

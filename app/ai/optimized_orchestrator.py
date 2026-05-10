@@ -415,15 +415,15 @@ Return JSON:
         # Determine side based on strategy and indicators
         rsi = market_data.get('rsi', 50)
         if strategy.get('strategy') == 'momentum':
-            side = "LONG" if rsi > 50 else "SHORT"
+            side = "BUY" if rsi > 50 else "SELL"
         elif strategy.get('strategy') == 'mean_reversion':
-            side = "SHORT" if rsi > 70 else "LONG" if rsi < 30 else "LONG"
+            side = "SELL" if rsi > 70 else "BUY" if rsi < 30 else "BUY"
         else:
-            side = "LONG"  # Default
+            side = "BUY"  # Default
         
         # Calculate take-profit (2:1 reward/risk ratio)
         stop_loss = self._calculate_stop_loss(current_price, strategy)
-        if side == "LONG":
+        if side == "BUY":
             take_profit = current_price + (current_price - stop_loss) * 2
         else:
             take_profit = current_price - (stop_loss - current_price) * 2

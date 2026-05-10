@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     BINANCE_PAPER_API_KEY: Optional[str] = None
     BINANCE_PAPER_API_SECRET: Optional[str] = None
     BINANCE_TESTNET: bool = True  # Default to testnet for safety
+    BINANCE_DEMO_MODE: str = "spot_demo"  # Options: spot_demo, futures_demo, testnet
     
     # MEXC Trading (Spot + Futures)
     MEXC_API_KEY: Optional[str] = None

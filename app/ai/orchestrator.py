@@ -390,10 +390,10 @@ class AIAgentOrchestrator:
         
         # Determine side based on strategy signal
         # In production, this would use actual strategy signals
-        side = "LONG" if confidence > 0.6 else "SHORT"
+        side = "BUY" if confidence > 0.6 else "SELL"
         
         # Calculate stop-loss and take-profit prices
-        if side == "LONG":
+        if side == "BUY":
             stop_loss_price = current_price * (1 - stop_loss_pct)
             take_profit_price = current_price * (1 + stop_loss_pct * 2)  # 2:1 reward:risk
         else:

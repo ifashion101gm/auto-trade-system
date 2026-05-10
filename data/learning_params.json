@@ -1,0 +1,11 @@
+{
+  "risk_per_trade": 0.01,
+  "max_position_size": 1000,
+  "stop_loss_pct": 0.02,
+  "take_profit_pct": 0.04,
+  "max_open_positions": 3,
+  "learning_rate": 0.001,
+  "min_trades_for_evaluation": 30,
+  "profit_factor_threshold": 1.2,
+  "last_updated": 1778444257.359145
+}
