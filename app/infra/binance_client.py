@@ -308,13 +308,15 @@ class BinanceClient:
                 timestamp = int(time.time() * 1000)
                 
                 # Round quantity to appropriate precision based on symbol
-                # BTC futures: 3 decimal places, most others: varies
-                if 'BTC' in symbol_clean:
+                # PAXG futures: 2 decimal places, BTC: 3, ETH: 2, others: varies
+                if 'PAXG' in symbol_clean:
+                    quantity_rounded = round(amount, 2)
+                elif 'BTC' in symbol_clean:
                     quantity_rounded = round(amount, 3)
                 elif 'ETH' in symbol_clean:
                     quantity_rounded = round(amount, 2)
                 else:
-                    quantity_rounded = round(amount, 8)  # Default high precision
+                    quantity_rounded = round(amount, 2)  # Default 2 decimal places for safety
                 
                 params = {
                     'symbol': symbol_clean,
