@@ -665,3 +665,20 @@ class BinanceClient:
             return base_cost + fee
         
         return base_cost
+    
+    async def validate_symbol(self, symbol: str) -> bool:
+        """
+        Check if symbol is available on this exchange.
+        
+        Args:
+            symbol: Trading pair to validate (e.g., 'PAXG/USDT')
+            
+        Returns:
+            True if symbol is available, False otherwise
+        """
+        try:
+            markets = await self.exchange.load_markets()
+            return symbol in markets
+        except Exception as e:
+            print(f"⚠️  Symbol validation failed: {e}")
+            return False

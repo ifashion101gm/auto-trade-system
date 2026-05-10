@@ -63,12 +63,25 @@ class AIAgentOrchestrator:
         
         # Fallback to heuristic logic
         volatility = market_data.get('volatility', 0.5)
-        if volatility < 0.3:
-            return "Low-vol"
-        elif volatility > 0.7:
-            return "High-vol"
+        
+        # Gold-specific volatility thresholds (PAXG/XAUT typically less volatile than crypto)
+        symbol = market_data.get('symbol', '')
+        if symbol in ['PAXG/USDT', 'XAUT/USDT', 'XAU/USDT']:
+            # Gold has lower typical volatility, adjust thresholds
+            if volatility < 0.15:  # Lower threshold for Low-vol
+                return "Low-vol"
+            elif volatility > 0.40:  # Lower threshold for High-vol
+                return "High-vol"
+            else:
+                return "Normal"
         else:
-            return "Normal"
+            # Crypto volatility thresholds
+            if volatility < 0.3:
+                return "Low-vol"
+            elif volatility > 0.7:
+                return "High-vol"
+            else:
+                return "Normal"
     
     async def select_strategy(self, market_data: Dict[str, Any], regime: str = "Normal") -> Dict[str, Any]:
         """
@@ -406,6 +419,23 @@ class AIAgentOrchestrator:
             "Normal": 2,
             "High-vol": 1  # Reduce leverage in high volatility
         }
+        
+        # Gold-specific leverage limits (PAXG/XAUT have different volatility than crypto)
+        symbol = market_data.get('symbol', '')
+        if symbol in ['PAXG/USDT', 'XAUT/USDT', 'XAU/USDT']:
+            leverage_map = {
+                "Low-vol": 5,    # Increased for Gold stability
+                "Normal": 3,
+                "High-vol": 2    # Reduced during high volatility
+            }
+            
+            # Adjust confidence threshold for Gold trades
+            from app.config import settings
+            min_confidence = getattr(settings, 'GOLD_MIN_CONFIDENCE', 0.65)
+            if confidence < min_confidence:
+                # Return None to skip trade if confidence too low
+                return None
+        
         leverage = leverage_map.get(regime, 2)
         
         return {

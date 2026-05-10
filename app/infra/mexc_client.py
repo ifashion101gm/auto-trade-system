@@ -4,6 +4,10 @@ Uses ccxt library for unified API access.
 """
 import ccxt.async_support as ccxt
 from typing import Dict, Any, Optional, List
+import hashlib
+import hmac
+import time
+import aiohttp
 from app.config import settings
 
 
@@ -44,12 +48,13 @@ class MEXCClient:
             raise ValueError("MEXC API credentials not configured")
         
         # Initialize ccxt exchange
+        # MEXC uses 'swap' for perpetual futures, 'spot' for spot markets
         self.exchange = ccxt.mexc({
             'apiKey': self.api_key,
             'secret': self.api_secret,
             'enableRateLimit': True,
             'options': {
-                'defaultType': self.market_type  # 'spot' or 'future'
+                'defaultType': 'swap' if self.market_type == 'futures' else 'spot'
             }
         })
         
@@ -61,41 +66,95 @@ class MEXCClient:
     
     async def fetch_balance(self) -> Dict[str, Any]:
         """
-        Fetch account balance.
+        Fetch account balance using MEXC Futures API v1.
         
         Returns:
             Dictionary with balance information
         """
         try:
-            balance = await self.exchange.fetch_balance()
-            
-            # Get USDT balance
-            usdt_balance = balance.get('USDT', {})
-            
-            return {
-                'total_usdt': usdt_balance.get('total', 0),
-                'free_usdt': usdt_balance.get('free', 0),
-                'used_usdt': usdt_balance.get('used', 0),
-                'balances': {k: v['total'] for k, v in balance.items() 
-                           if isinstance(v, dict) and 'total' in v and v['total'] > 0}
-            }
+            # Try ccxt first
+            try:
+                balance = await self.exchange.fetch_balance()
+                usdt_balance = balance.get('USDT', {})
+                
+                return {
+                    'total_usdt': usdt_balance.get('total', 0),
+                    'free_usdt': usdt_balance.get('free', 0),
+                    'used_usdt': usdt_balance.get('used', 0),
+                    'balances': {k: v['total'] for k, v in balance.items() 
+                               if isinstance(v, dict) and 'total' in v and v['total'] > 0}
+                }
+            except Exception:
+                # Fallback to direct MEXC API v1
+                return await self._fetch_balance_direct()
         except Exception as e:
             raise Exception(f"Failed to fetch balance: {str(e)}")
+    
+    async def _fetch_balance_direct(self) -> Dict[str, Any]:
+        """Fetch balance directly from MEXC Futures API v1"""
+        import json
+        
+        timestamp = int(time.time() * 1000)
+        
+        # Build request body (without sign first)
+        body_dict = {
+            'api_key': self.api_key,
+            'req_time': timestamp
+        }
+        
+        # Create signature from the request body (before adding sign)
+        json_body_for_sign = json.dumps(body_dict, sort_keys=True, separators=(',', ':'))
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            json_body_for_sign.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        # Add signature to body
+        body_dict['sign'] = signature
+        
+        headers = {
+            'X-MEXC-APIKEY': self.api_key,
+            'Content-Type': 'application/json'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                'https://contract.mexc.com/api/v1/private/account/assets',
+                headers=headers,
+                json=body_dict,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json()
+                
+                if data.get('success') and data.get('data'):
+                    account_data = data['data']
+                    return {
+                        'total_usdt': float(account_data.get('walletBalance', 0)),
+                        'free_usdt': float(account_data.get('availableBalance', 0)),
+                        'used_usdt': float(account_data.get('walletBalance', 0)) - float(account_data.get('availableBalance', 0)),
+                        'balances': {'USDT': float(account_data.get('walletBalance', 0))}
+                    }
+                else:
+                    raise Exception(f"MEXC API error: {data.get('message', 'Unknown error')}")
     
     async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         """
         Fetch real-time ticker data.
         
         Args:
-            symbol: Trading pair (e.g., 'BTC/USDT')
+            symbol: Trading pair (e.g., 'XAUT_USDT' or 'XAUT/USDT:USDT')
             
         Returns:
             Ticker data with price, volume, etc.
         """
         try:
-            ticker = await self.exchange.fetch_ticker(symbol)
+            # Normalize symbol format for MEXC futures
+            normalized_symbol = self._normalize_symbol(symbol)
+            
+            ticker = await self.exchange.fetch_ticker(normalized_symbol)
             return {
-                'symbol': symbol,
+                'symbol': normalized_symbol,
                 'last_price': ticker['last'],
                 'bid': ticker['bid'],
                 'ask': ticker['ask'],
@@ -106,6 +165,64 @@ class MEXCClient:
             }
         except Exception as e:
             raise Exception(f"Failed to fetch ticker for {symbol}: {str(e)}")
+    
+    def _normalize_symbol(self, symbol: str) -> str:
+        """
+        Normalize symbol format for MEXC.
+        
+        MEXC uses different formats:
+        - Spot: 'XAUT/USDT'
+        - Futures/Swap: 'XAUT/USDT:USDT'
+        
+        Args:
+            symbol: Input symbol (e.g., 'XAUT_USDT', 'XAUT/USDT', 'XAUT/USDT:USDT')
+            
+        Returns:
+            Normalized symbol in correct format
+        """
+        # If it already has the futures format, return as-is
+        if ':' in symbol:
+            return symbol
+        
+        # Convert underscore format to slash format
+        if '_' in symbol:
+            symbol = symbol.replace('_', '/')
+        
+        # Add futures suffix for swap contracts
+        if self.market_type == 'futures':
+            # Ensure it has the :USDT suffix for futures
+            if not symbol.endswith(':USDT'):
+                base = symbol.split('/')[0]  # e.g., 'XAUT'
+                symbol = f"{base}/USDT:USDT"
+        
+        return symbol
+    
+    def _sign_mexc_request(self, params: Dict[str, Any]) -> str:
+        """
+        Sign MEXC API request using HMAC SHA256.
+        For POST requests with JSON body, sign the JSON string.
+        For GET requests with query params, sign the query string.
+        
+        Args:
+            params: Dictionary of request parameters (excluding 'sign')
+            
+        Returns:
+            HMAC SHA256 signature
+        """
+        import json
+        
+        # For MEXC Futures API v1, sign the JSON body for POST requests
+        # Sort keys to ensure consistent ordering
+        json_body = json.dumps(params, sort_keys=True, separators=(',', ':'))
+        
+        # Create signature from JSON body
+        signature = hmac.new(
+            self.api_secret.encode('utf-8'),
+            json_body.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return signature
     
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> List[List]:
         """
@@ -136,7 +253,7 @@ class MEXCClient:
         Place a market order.
         
         Args:
-            symbol: Trading pair (e.g., 'BTC/USDT')
+            symbol: Trading pair (e.g., 'XAUT_USDT' or 'BTC/USDT')
             side: 'buy' or 'sell'
             amount: Quantity to trade
             leverage: Leverage multiplier (for futures)
@@ -145,12 +262,15 @@ class MEXCClient:
             Order details including ID, status, filled price
         """
         try:
+            # Normalize symbol format
+            normalized_symbol = self._normalize_symbol(symbol)
+            
             # Set leverage for futures
             if self.market_type == 'futures' and leverage > 1:
-                await self.exchange.set_leverage(leverage, symbol)
+                await self.exchange.set_leverage(leverage, normalized_symbol)
             
             # Place market order
-            order = await self.exchange.create_market_order(symbol, side, amount)
+            order = await self.exchange.create_market_order(normalized_symbol, side, amount)
             
             return {
                 'order_id': order['id'],
@@ -182,7 +302,7 @@ class MEXCClient:
         Place a limit order.
         
         Args:
-            symbol: Trading pair
+            symbol: Trading pair (e.g., 'XAUT_USDT' or 'BTC/USDT')
             side: 'buy' or 'sell'
             amount: Quantity
             price: Limit price
@@ -192,12 +312,15 @@ class MEXCClient:
             Order details
         """
         try:
+            # Normalize symbol format
+            normalized_symbol = self._normalize_symbol(symbol)
+            
             # Set leverage for futures
             if self.market_type == 'futures' and leverage > 1:
-                await self.exchange.set_leverage(leverage, symbol)
+                await self.exchange.set_leverage(leverage, normalized_symbol)
             
             # Place limit order
-            order = await self.exchange.create_limit_order(symbol, side, amount, price)
+            order = await self.exchange.create_limit_order(normalized_symbol, side, amount, price)
             
             return {
                 'order_id': order['id'],
@@ -229,7 +352,8 @@ class MEXCClient:
             Order status details
         """
         try:
-            order = await self.exchange.fetch_order(order_id, symbol)
+            normalized_symbol = self._normalize_symbol(symbol)
+            order = await self.exchange.fetch_order(order_id, normalized_symbol)
             
             return {
                 'order_id': order['id'],
@@ -262,7 +386,8 @@ class MEXCClient:
             Cancellation result
         """
         try:
-            result = await self.exchange.cancel_order(order_id, symbol)
+            normalized_symbol = self._normalize_symbol(symbol)
+            result = await self.exchange.cancel_order(order_id, normalized_symbol)
             
             return {
                 'order_id': result['id'],
@@ -319,8 +444,10 @@ class MEXCClient:
             raise Exception("Position closing only available for futures")
         
         try:
+            normalized_symbol = self._normalize_symbol(symbol)
+            
             # Get current position
-            positions = await self.exchange.fetch_positions([symbol])
+            positions = await self.exchange.fetch_positions([normalized_symbol])
             
             for pos in positions:
                 if pos.get('contracts') and pos['contracts'] > 0:
@@ -374,3 +501,20 @@ class MEXCClient:
             return base_cost + fee
         
         return base_cost
+    
+    async def validate_symbol(self, symbol: str) -> bool:
+        """
+        Check if symbol is available on this exchange.
+        
+        Args:
+            symbol: Trading pair to validate (e.g., 'XAUT/USDT')
+            
+        Returns:
+            True if symbol is available, False otherwise
+        """
+        try:
+            markets = await self.exchange.load_markets()
+            return symbol in markets
+        except Exception as e:
+            print(f"⚠️  Symbol validation failed: {e}")
+            return False

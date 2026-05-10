@@ -263,3 +263,67 @@ class TelegramNotifier:
         """.strip()
         
         return await self.send_message(message)
+    
+    async def send_gold_dual_trade_alert(
+        self,
+        trade_data: Dict[str, Any]
+    ) -> bool:
+        """
+        Send specialized alert for Gold dual trades (Binance paper + MEXC live).
+        
+        Args:
+            trade_data: Dictionary with dual execution results
+            
+        Returns:
+            True if sent successfully
+        """
+        binance_result = trade_data.get('binance', {})
+        mexc_result = trade_data.get('mexc', {})
+        comparison = trade_data.get('comparison', {})
+        
+        # Extract Binance info
+        binance_status = binance_result.get('status', 'N/A') if binance_result else 'N/A'
+        binance_price = None
+        if binance_result and binance_result.get('order'):
+            binance_price = binance_result['order'].get('price')
+        
+        # Extract MEXC info
+        mexc_status = mexc_result.get('status', 'N/A') if mexc_result else 'N/A'
+        mexc_price = None
+        if mexc_result and mexc_result.get('order'):
+            mexc_price = mexc_result['order'].get('price')
+        
+        # Calculate price difference
+        price_diff = comparison.get('price_difference')
+        position_value = comparison.get('position_value_usd', 0)
+        strategy = comparison.get('strategy', 'Unknown')
+        regime = comparison.get('regime', 'Unknown')
+        confidence = comparison.get('confidence', 0)
+        
+        # Status emojis
+        binance_emoji = "✅" if binance_status == 'success' else "❌"
+        mexc_emoji = "✅" if mexc_status == 'success' else "❌"
+        
+        message = f"""
+<b>🥇 GOLD DUAL TRADE EXECUTED</b>
+
+<b>Strategy:</b> {strategy}
+<b>Regime:</b> {regime}
+<b>Confidence:</b> {confidence*100:.1f}%
+
+<b>Binance Testnet (Paper):</b> {binance_emoji} {binance_status.upper()}
+• Symbol: PAXG/USDT
+• Price: ${binance_price:,.2f if binance_price else 'N/A'}
+
+<b>MEXC Live (Real):</b> {mexc_emoji} {mexc_status.upper()}
+• Symbol: XAUT/USDT
+• Price: ${mexc_price:,.2f if mexc_price else 'N/A'}
+
+<b>Comparison:</b>
+• Position Value: ${position_value:,.2f}
+• Price Difference: ${price_diff:,.2f if price_diff else 'N/A'}
+
+<i>Paper vs Live execution comparison for Gold futures</i>
+        """.strip()
+        
+        return await self.send_message(message)

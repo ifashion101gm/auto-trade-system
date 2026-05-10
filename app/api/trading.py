@@ -174,6 +174,138 @@ async def run_paper_trade_cycle(
     }
 
 
+@router.post("/gold-futures/dual-execute")
+async def execute_gold_dual_trade(
+    request: Request,
+    user_id: str = "default_user",
+    auth: str = None,
+    db_session: AsyncSession = Depends(get_session)
+):
+    """
+    Execute Gold trade on BOTH Binance Testnet (paper) and MEXC (live).
+    Returns comparison data between paper and live execution.
+    
+    This endpoint implements hybrid trading for Gold futures:
+    - Binance: PAXG/USDT paper trades on testnet
+    - MEXC: XAUT/USDT live trades with real money
+    
+    Requires valid trading secret authentication.
+    """
+    # Verify authentication
+    verify_trading_secret(auth)
+    
+    # Enforce rate limit
+    await enforce_trading_rate_limit(request)
+    
+    from app.services.live_trading_service import LiveTradingService
+    from app.config import settings
+    
+    # Initialize trading service
+    service = LiveTradingService()
+    
+    try:
+        # Fetch current Gold market data from both exchanges
+        print(f"\n🥇 Starting Gold dual execution cycle...")
+        
+        # Use Binance symbol for market data (PAXG/USDT)
+        market_data = await service._fetch_market_data(settings.GOLD_SYMBOL_BINANCE)
+        market_data['symbol'] = settings.GOLD_SYMBOL_BINANCE  # Ensure correct symbol
+        
+        print(f"   Market data fetched: ${market_data['current_price']:,.2f}")
+        
+        # Run AI analysis cycle
+        from app.ai.orchestrator import AIAgentOrchestrator
+        orchestrator = AIAgentOrchestrator()
+        
+        ai_result = await orchestrator.run_paper_trade_cycle(
+            market_data=market_data,
+            user_id=user_id,
+            db_session=db_session
+        )
+        
+        if ai_result['status'] != 'success':
+            raise HTTPException(
+                status_code=500,
+                detail=f"AI analysis failed: {ai_result.get('error')}"
+            )
+        
+        proposal = ai_result.get('trade_proposal', {})
+        
+        if not proposal:
+            raise HTTPException(
+                status_code=400,
+                detail="No trade proposal generated (confidence may be too low)"
+            )
+        
+        print(f"   AI Proposal: {proposal.get('side')} @ ${proposal.get('entry_price'):,.2f}")
+        print(f"   Strategy: {proposal.get('strategy_name')}")
+        print(f"   Confidence: {proposal.get('confidence')*100:.1f}%")
+        
+        # Execute dual trade on both exchanges
+        result = await service.execute_dual_gold_trade(
+            proposal=proposal,
+            user_id=user_id,
+            db_session=db_session
+        )
+        
+        # Commit database changes
+        await db_session.commit()
+        
+        # Build comparison data
+        binance_price = None
+        mexc_price = None
+        
+        if result['binance'] and result['binance']['status'] == 'success':
+            binance_price = result['binance']['order'].get('price')
+        
+        if result['mexc'] and result['mexc']['status'] == 'success':
+            mexc_price = result['mexc']['order'].get('price')
+        
+        price_difference = None
+        if binance_price and mexc_price:
+            price_difference = abs(binance_price - mexc_price)
+        
+        return {
+            "status": "success",
+            "message": "Gold dual trade executed successfully",
+            "binance_paper": {
+                "exchange": "Binance Testnet",
+                "symbol": settings.GOLD_SYMBOL_BINANCE,
+                "result": result['binance'],
+                "trade_id": result.get('binance_trade_id')
+            },
+            "mexc_live": {
+                "exchange": "MEXC Live",
+                "symbol": settings.GOLD_SYMBOL_MEXC,
+                "result": result['mexc'],
+                "trade_id": result.get('mexc_trade_id')
+            },
+            "comparison": {
+                "position_value_usd": result.get('position_value_usd'),
+                "binance_price": binance_price,
+                "mexc_price": mexc_price,
+                "price_difference": price_difference,
+                "strategy": proposal.get('strategy_name'),
+                "regime": proposal.get('regime'),
+                "confidence": proposal.get('confidence')
+            },
+            "ai_analysis": {
+                "regime": ai_result.get('regime'),
+                "strategy": ai_result.get('strategy'),
+                "risk": ai_result.get('risk')
+            }
+        }
+        
+    except Exception as e:
+        await db_session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Dual execution failed: {str(e)}"
+        )
+    finally:
+        await service.close()
+
+
 async def execute_paper_trade(
     db_session: AsyncSession,
     proposal: dict,

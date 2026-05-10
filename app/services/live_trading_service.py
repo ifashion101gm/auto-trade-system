@@ -13,6 +13,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.ai.orchestrator import AIAgentOrchestrator
 from app.infra.exchange_manager import UnifiedExchangeManager
+from app.infra.hybrid_exchange_manager import HybridExchangeManager
 from app.infra.telegram_notifier import TelegramNotifier
 from app.storage.models import PaperTrades, DecisionJournal, StrategyEvaluations, TradeProposals
 from app.learning.param_cache import LearningParameterCache
@@ -67,7 +68,9 @@ class LiveTradingService:
         self,
         symbol: str = "BTC/USDT",
         user_id: str = "default_user",
-        db_session: Optional[AsyncSession] = None
+        db_session: Optional[AsyncSession] = None,
+        execute_on_binance: bool = True,
+        execute_on_mexc: bool = False
     ) -> Dict[str, Any]:
         """
         Execute complete trading cycle with real market data and order execution.
@@ -584,3 +587,171 @@ class LiveTradingService:
     async def close(self):
         """Close all connections."""
         await self.exchange_manager.close()
+    
+    async def execute_dual_gold_trade(
+        self,
+        proposal: Dict[str, Any],
+        user_id: str = "default_user",
+        db_session: Optional[AsyncSession] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute Gold trade on BOTH Binance Testnet (paper) and MEXC (live).
+        
+        This implements the hybrid trading strategy for Gold futures comparison.
+        
+        Args:
+            proposal: Trade proposal from AI orchestrator
+            user_id: User identifier
+            db_session: Database session for persistence
+            
+        Returns:
+            Dictionary with execution results from both exchanges
+        """
+        # Initialize hybrid manager
+        hybrid_manager = HybridExchangeManager()
+        
+        try:
+            # Extract trade parameters
+            side = proposal['side'].lower()
+            leverage = proposal.get('leverage', 1)
+            
+            # Calculate quantities for each exchange based on position size
+            entry_price = proposal['entry_price']
+            quantity = proposal['quantity']
+            position_value_usd = entry_price * quantity
+            
+            # Apply risk management for live MEXC trades
+            if settings.GOLD_MIN_CONFIDENCE:
+                if proposal.get('confidence', 0) < settings.GOLD_MIN_CONFIDENCE:
+                    raise ValueError(
+                        f"Confidence {proposal.get('confidence')} below minimum "
+                        f"{settings.GOLD_MIN_CONFIDENCE} for Gold trades"
+                    )
+            
+            # Check maximum position size for live trades
+            max_leverage = getattr(settings, 'GOLD_MAX_LEVERAGE', 5)
+            if leverage > max_leverage:
+                raise ValueError(
+                    f"Leverage {leverage} exceeds maximum {max_leverage} for Gold"
+                )
+            
+            print(f"\n🥇 Executing dual Gold trade:")
+            print(f"   Side: {side.upper()}")
+            print(f"   Binance (Paper): {settings.GOLD_SYMBOL_BINANCE}")
+            print(f"   MEXC (Live): {settings.GOLD_SYMBOL_MEXC}")
+            print(f"   Position Value: ${position_value_usd:.2f}")
+            print(f"   Leverage: {leverage}x")
+            
+            # Execute on both exchanges simultaneously
+            result = await hybrid_manager.execute_dual_trade(
+                side=side,
+                amount_binance=quantity,
+                amount_mexc=quantity,
+                leverage=leverage
+            )
+            
+            # Record trades to database
+            binance_trade_id = None
+            mexc_trade_id = None
+            
+            if db_session:
+                # Record Binance paper trade
+                if result['binance'] and result['binance']['status'] == 'success':
+                    binance_order = result['binance']['order']
+                    binance_trade = PaperTrades(
+                        ts_open=datetime.utcnow().isoformat(),
+                        user_id=user_id,
+                        exchange='binance',
+                        symbol=settings.GOLD_SYMBOL_BINANCE,
+                        side=side.upper(),
+                        leverage=leverage,
+                        qty=quantity,
+                        entry_price=binance_order.get('price') or entry_price,
+                        exit_price=None,
+                        stop_loss=proposal.get('stop_loss'),
+                        take_profit=proposal.get('take_profit'),
+                        profit=None,
+                        profit_pct=None,
+                        status='open',
+                        notes=json.dumps({
+                            'strategy': proposal.get('strategy_name'),
+                            'regime': proposal.get('regime'),
+                            'execution_type': 'paper',
+                            'order_id': binance_order.get('order_id')
+                        }),
+                        execution_mode='paper'
+                    )
+                    db_session.add(binance_trade)
+                    await db_session.flush()
+                    binance_trade_id = binance_trade.id
+                
+                # Record MEXC live trade
+                if result['mexc'] and result['mexc']['status'] == 'success':
+                    mexc_order = result['mexc']['order']
+                    mexc_trade = PaperTrades(
+                        ts_open=datetime.utcnow().isoformat(),
+                        user_id=user_id,
+                        exchange='mexc',
+                        symbol=settings.GOLD_SYMBOL_MEXC,
+                        side=side.upper(),
+                        leverage=leverage,
+                        qty=quantity,
+                        entry_price=mexc_order.get('price') or entry_price,
+                        exit_price=None,
+                        stop_loss=proposal.get('stop_loss'),
+                        take_profit=proposal.get('take_profit'),
+                        profit=None,
+                        profit_pct=None,
+                        status='open',
+                        notes=json.dumps({
+                            'strategy': proposal.get('strategy_name'),
+                            'regime': proposal.get('regime'),
+                            'execution_type': 'live',
+                            'order_id': mexc_order.get('order_id'),
+                            'paired_with': binance_trade_id
+                        }),
+                        execution_mode='live'
+                    )
+                    db_session.add(mexc_trade)
+                    await db_session.flush()
+                    mexc_trade_id = mexc_trade.id
+                
+                # Update pairing references
+                if binance_trade_id and mexc_trade_id:
+                    from sqlalchemy import select
+                    stmt = select(PaperTrades).where(PaperTrades.id == binance_trade_id)
+                    res = await db_session.execute(stmt)
+                    bt = res.scalar_one_or_none()
+                    if bt:
+                        bt_notes = json.loads(bt.notes) if bt.notes else {}
+                        bt_notes['paired_with'] = mexc_trade_id
+                        bt.notes = json.dumps(bt_notes)
+            
+            # Send Telegram notification
+            notifier = TelegramNotifier()
+            await notifier.send_gold_dual_trade_alert({
+                'binance': result['binance'],
+                'mexc': result['mexc'],
+                'comparison': {
+                    'position_value_usd': position_value_usd,
+                    'price_difference': None,  # Will be calculated after both execute
+                    'strategy': proposal.get('strategy_name'),
+                    'regime': proposal.get('regime'),
+                    'confidence': proposal.get('confidence')
+                }
+            })
+            
+            return {
+                'status': 'success',
+                'binance': result['binance'],
+                'mexc': result['mexc'],
+                'binance_trade_id': binance_trade_id,
+                'mexc_trade_id': mexc_trade_id,
+                'position_value_usd': position_value_usd
+            }
+            
+        except Exception as e:
+            print(f"❌ Dual Gold trade failed: {e}")
+            raise
+        finally:
+            await hybrid_manager.close()

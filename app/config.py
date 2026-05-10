@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     # In semi-auto mode, positions ≤ this value auto-execute
     AUTO_EXECUTE_THRESHOLD_USD: float = 100.0
     
+    # Gold Futures Trading Configuration
+    ACTIVE_EXCHANGE: str = "binance"
+    GOLD_SYMBOL_BINANCE: str = "PAXG/USDT"  # Paxos Gold on Binance Testnet
+    GOLD_SYMBOL_MEXC: str = "XAUT/USDT"     # Tether Gold on MEXC
+    GOLD_MAX_LEVERAGE: int = 5
+    GOLD_RISK_PER_TRADE: float = 0.01
+    GOLD_MIN_CONFIDENCE: float = 0.65
+    
     # General
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
