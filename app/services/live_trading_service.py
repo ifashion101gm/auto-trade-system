@@ -240,7 +240,11 @@ class LiveTradingService:
         db_session: Optional[AsyncSession] = None
     ) -> Dict[str, Any]:
         """
-        Execute trade based on execution mode.
+        Execute trade based on execution mode and position size.
+        
+        Hybrid Execution Logic:
+        - Position ≤ $100 USD: Auto-execute (fully-auto behavior)
+        - Position > $100 USD: Require confirmation (semi-auto behavior)
         
         Args:
             proposal: Trade proposal from AI
@@ -255,6 +259,9 @@ class LiveTradingService:
         entry_price = proposal['entry_price']
         quantity = proposal['quantity']
         leverage = proposal['leverage']
+        
+        # Calculate position value in USD
+        position_value_usd = entry_price * quantity
         
         # Save proposal to database
         if db_session:
@@ -273,7 +280,8 @@ class LiveTradingService:
                 status='pending',
                 ai_metadata=json.dumps({
                     'regime': proposal.get('regime'),
-                    'risk_level': proposal.get('risk_level')
+                    'risk_level': proposal.get('risk_level'),
+                    'position_value_usd': position_value_usd
                 })
             )
             db_session.add(trade_proposal)
@@ -282,30 +290,54 @@ class LiveTradingService:
         else:
             proposal_id = None
         
-        # Execute based on mode
+        # Determine execution mode based on position size
+        should_auto_execute = False
+        
         if self.execution_mode == 'proposal':
-            # Just return proposal, no execution
+            # Always require manual execution
             return {
                 'status': 'proposal_only',
                 'proposal_id': proposal_id,
                 'message': 'Trade proposal generated. Manual execution required.',
+                'position_value_usd': position_value_usd,
                 **proposal
             }
         
         elif self.execution_mode == 'semi-auto':
-            # Save proposal and wait for confirmation
-            if db_session:
-                await db_session.commit()
+            # HYBRID MODE: Check position size threshold
+            AUTO_EXECUTE_THRESHOLD_USD = settings.AUTO_EXECUTE_THRESHOLD_USD
             
-            return {
-                'status': 'awaiting_confirmation',
-                'proposal_id': proposal_id,
-                'message': f'Proposal saved. Call confirm endpoint to execute.',
-                **proposal
-            }
+            if position_value_usd <= AUTO_EXECUTE_THRESHOLD_USD:
+                # Small position: Auto-execute (fully-auto behavior)
+                should_auto_execute = True
+                print(f"   💰 Position value: ${position_value_usd:.2f} ≤ ${AUTO_EXECUTE_THRESHOLD_USD:.2f}")
+                print(f"   ⚡ Auto-executing (small position)")
+            else:
+                # Large position: Require confirmation (semi-auto behavior)
+                should_auto_execute = False
+                print(f"   💰 Position value: ${position_value_usd:.2f} > ${AUTO_EXECUTE_THRESHOLD_USD:.2f}")
+                print(f"   ⏸️  Awaiting confirmation (large position)")
+                
+                if db_session:
+                    await db_session.commit()
+                
+                return {
+                    'status': 'awaiting_confirmation',
+                    'proposal_id': proposal_id,
+                    'message': f'Proposal saved. Position value ${position_value_usd:.2f} exceeds ${AUTO_EXECUTE_THRESHOLD_USD:.2f} threshold. Call confirm endpoint to execute.',
+                    'position_value_usd': position_value_usd,
+                    **proposal
+                }
         
         elif self.execution_mode == 'fully-auto':
-            # Execute immediately on exchange
+            # Always auto-execute
+            should_auto_execute = True
+        
+        else:
+            raise ValueError(f"Invalid execution mode: {self.execution_mode}")
+        
+        # Execute order if auto-execution is enabled
+        if should_auto_execute:
             try:
                 # Place market order
                 order_result = await self.exchange_manager.create_market_order(
@@ -344,8 +376,8 @@ class LiveTradingService:
                     profit=None,
                     profit_pct=None,
                     status='open',
-                    notes=f"Order ID: {order_result['order_id']}, Fee: ${fee_cost:.4f}",
-                    execution_mode='fully-auto'
+                    notes=f"Order ID: {order_result['order_id']}, Fee: ${fee_cost:.4f}, Position: ${position_value_usd:.2f}",
+                    execution_mode='auto' if position_value_usd <= 100 else 'fully-auto'
                 )
                 
                 if db_session:
@@ -361,6 +393,8 @@ class LiveTradingService:
                     'fee_currency': fee.get('currency', 'USDT'),
                     'proposal_id': proposal_id,
                     'trade_id': trade_record.id if db_session else None,
+                    'position_value_usd': position_value_usd,
+                    'auto_executed': position_value_usd <= 100,
                     **proposal
                 }
                 

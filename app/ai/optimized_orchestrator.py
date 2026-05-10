@@ -149,11 +149,30 @@ class OptimizedAIAgentOrchestrator:
             
             # Stage 5: Execute Order (Code-Based - NO LLM)
             execution_result = None
-            if exchange_manager and settings.EXECUTION_MODE == 'fully-auto':
-                execution_result = await self._execute_order(
-                    proposal=trade_proposal,
-                    exchange_manager=exchange_manager
-                )
+            if exchange_manager:
+                # Check execution mode and position size for hybrid logic
+                should_execute = False
+                
+                if settings.EXECUTION_MODE == 'fully-auto':
+                    # Always execute in fully-auto mode
+                    should_execute = True
+                elif settings.EXECUTION_MODE == 'semi-auto':
+                    # HYBRID MODE: Auto-execute if position ≤ threshold
+                    position_value = trade_proposal.get('entry_price', 0) * trade_proposal.get('quantity', 0)
+                    AUTO_EXECUTE_THRESHOLD_USD = settings.AUTO_EXECUTE_THRESHOLD_USD
+                    
+                    if position_value <= AUTO_EXECUTE_THRESHOLD_USD:
+                        should_execute = True
+                        print(f"   ⚡ Small position (${position_value:.2f}): Auto-executing")
+                    else:
+                        print(f"   ⏸️  Large position (${position_value:.2f}): Awaiting confirmation")
+                # proposal mode: don't execute
+                
+                if should_execute:
+                    execution_result = await self._execute_order(
+                        proposal=trade_proposal,
+                        exchange_manager=exchange_manager
+                    )
             
             # Stage 6: Monitor Performance (Code Metrics - NO LLM)
             self.monitor.record_api_call(

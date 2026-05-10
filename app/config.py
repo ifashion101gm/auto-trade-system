@@ -57,6 +57,10 @@ class Settings(BaseSettings):
     # Execution Mode: proposal, semi-auto, fully-auto
     EXECUTION_MODE: str = "semi-auto"
     
+    # Hybrid Execution Threshold (USD)
+    # In semi-auto mode, positions ≤ this value auto-execute
+    AUTO_EXECUTE_THRESHOLD_USD: float = 100.0
+    
     # General
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
