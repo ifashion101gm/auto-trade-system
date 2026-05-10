@@ -275,7 +275,7 @@ class DeterministicRiskManager:
         max_risk_per_trade: float = 0.01,  # 1% max risk
         max_daily_drawdown: float = 0.05,  # 5% daily DD stop
         max_loss_streak: int = 3,          # Stop after 3 consecutive losses
-        account_balance: float = 10000.0   # Starting balance
+        account_balance: float = 100.0     # Low-risk validation balance ($100)
     ):
         """Initialize deterministic risk manager."""
         self.max_risk_per_trade = max_risk_per_trade

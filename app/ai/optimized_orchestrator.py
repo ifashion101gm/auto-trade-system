@@ -56,7 +56,7 @@ class OptimizedAIAgentOrchestrator:
             max_risk_per_trade=0.01,      # 1% max risk per trade
             max_daily_drawdown=0.05,      # 5% daily drawdown limit
             max_loss_streak=3,            # Stop after 3 consecutive losses
-            account_balance=10000         # Default balance
+            account_balance=100           # Low-risk validation balance ($100)
         )
         self.exec_engine = CodeBasedExecutionEngine(
             max_slippage_pct=0.5,         # Max 0.5% slippage
