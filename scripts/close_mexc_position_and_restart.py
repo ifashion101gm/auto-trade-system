@@ -250,6 +250,19 @@ class MexcPositionCloser:
                     'trade_id': execution.get('trade_id'),
                     'cycle_time_ms': result.get('cycle_time_ms', 0)
                 }
+            elif result['status'] == 'rejected':
+                # Trade rejected by quality filter - this is normal, not an error
+                reason = result.get('rejection_reason', 'Unknown')
+                quality_score = result.get('quality_score', 0)
+                logger.info(f"⚠️  New cycle completed - trade rejected (Quality: {quality_score}/100)")
+                logger.info(f"   Reason: {reason}")
+                
+                return {
+                    'status': 'rejected',
+                    'reason': reason,
+                    'quality_score': quality_score,
+                    'cycle_time_ms': result.get('cycle_time_ms', 0)
+                }
             else:
                 logger.error(f"❌ Cycle failed: {result.get('error')}")
                 return {'status': 'failed', 'error': result.get('error')}

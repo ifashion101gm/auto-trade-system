@@ -3,6 +3,7 @@ Telegram notification service for trade alerts and system updates.
 Sends structured trade reports to Telegram upon trade events.
 """
 import httpx
+from datetime import datetime
 from typing import Optional, Dict, Any
 from app.config import settings
 
@@ -451,4 +452,52 @@ class TelegramNotifier:
             message += f"<b>Execution Mode:</b> {settings.EXECUTION_MODE}"
         
         message = message.strip()
+        return await self.send_message(message)
+    
+    async def send_trade_rejection_report(
+        self,
+        symbol: str,
+        reason: str,
+        quality_score: int,
+        cycle_time_ms: float
+    ) -> bool:
+        """
+        Send trade rejection report when AI quality filter blocks a trade.
+        
+        Args:
+            symbol: Trading pair symbol
+            reason: Rejection reason from quality filter
+            quality_score: Quality score (0-100)
+            cycle_time_ms: Cycle execution time in milliseconds
+            
+        Returns:
+            True if sent successfully
+        """
+        # Determine emoji based on score
+        if quality_score >= 80:
+            emoji = "⚠️"
+            severity = "MARGINAL"
+        elif quality_score >= 60:
+            emoji = "🟡"
+            severity = "LOW QUALITY"
+        else:
+            emoji = "🔴"
+            severity = "POOR QUALITY"
+        
+        message = f"""
+<b>{emoji} Trade Proposal REJECTED by Quality Filter</b>
+
+<b>Symbol:</b> {symbol}
+<b>Severity:</b> {severity}
+<b>Quality Score:</b> {quality_score}/100
+
+<b>Rejection Reason:</b>
+{reason}
+
+<b>Cycle Time:</b> {cycle_time_ms:.0f}ms
+<b>Timestamp:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC
+
+<i>This trade did not meet minimum quality standards and was blocked before validation.</i>
+        """.strip()
+        
         return await self.send_message(message)

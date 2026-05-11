@@ -114,8 +114,38 @@ class LiveTradingService:
                 db_session=db_session
             )
             
-            if ai_result['status'] != 'success':
-                raise Exception(f"AI analysis failed: {ai_result.get('error')}")
+            # Handle AI rejection gracefully (not an error, just no trade)
+            if ai_result.get('status') == 'rejected':
+                reason = ai_result.get('reason', 'Unknown')
+                quality_score = ai_result.get('quality_score', 0)
+                logger.warning(f"   ⚠️  Trade proposal rejected by quality filter")
+                logger.warning(f"      Reason: {reason}")
+                logger.warning(f"      Quality Score: {quality_score}/100")
+                
+                results['stages']['ai_analysis'] = 'rejected'
+                results['rejection_reason'] = reason
+                results['quality_score'] = quality_score
+                results['cycle_time_ms'] = ai_result.get('cycle_time_ms', 0)
+                results['status'] = 'rejected'  # Set status to rejected, not failed
+                
+                # Send rejection notification to Telegram
+                try:
+                    from app.infra.telegram_notifier import TelegramNotifier
+                    notifier = TelegramNotifier()
+                    await notifier.send_trade_rejection_report(
+                        symbol=symbol,
+                        reason=reason,
+                        quality_score=quality_score,
+                        cycle_time_ms=results['cycle_time_ms']
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send rejection report: {e}")
+                
+                return results
+            
+            if ai_result.get('status') != 'success':
+                error_msg = ai_result.get('error', 'Unknown error')
+                raise Exception(f"AI analysis failed: {error_msg}")
             
             results['stages']['ai_analysis'] = 'success'
             results['ai_result'] = ai_result
