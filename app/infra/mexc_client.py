@@ -172,32 +172,43 @@ class MEXCClient:
     
     def _normalize_symbol(self, symbol: str) -> str:
         """
-        Normalize symbol format for MEXC.
+        Normalize symbol format for MEXC with CCXT.
         
-        MEXC uses different formats:
-        - Spot: 'XAUT/USDT'
-        - Futures/Swap: 'XAUT/USDT:USDT'
+        CCXT expects standard slash format for MEXC futures:
+        - 'BTC/USDT:USDT' for standard futures
+        - 'GOLD(XAUT)/USDT' for gold futures (no settlement suffix)
         
         Args:
-            symbol: Input symbol (e.g., 'XAUT_USDT', 'XAUT/USDT', 'XAUT/USDT:USDT')
+            symbol: Input symbol (e.g., 'XAUT_USDT', 'XAUT/USDT', 'GOLD(XAUT)/USDT')
             
         Returns:
-            Normalized symbol in correct format
+            Normalized symbol in CCXT-compatible format
         """
-        # If it already has the futures format, return as-is
-        if ':' in symbol:
+        # Convert underscore format to slash format for CCXT
+        if '_' in symbol and '/' not in symbol:
+            # Only convert if there's no slash already
+            parts = symbol.split('_')
+            if len(parts) == 2:
+                symbol = f"{parts[0]}/{parts[1]}"
+        
+        # For CCXT, most futures use BASE/QUOTE:SETTLEMENT format
+        # But GOLD futures are special: GOLD(XAUT)/USDT (no :USDT suffix)
+        # Check if this is a GOLD symbol
+        if symbol.upper().startswith('GOLD('):
+            # GOLD futures don't need :USDT suffix
+            # Ensure format is GOLD(XAUT)/USDT
+            if ':' in symbol:
+                symbol = symbol.split(':')[0]  # Remove any :USDT suffix
             return symbol
         
-        # Convert underscore format to slash format
-        if '_' in symbol:
-            symbol = symbol.replace('_', '/')
-        
-        # Add futures suffix for swap contracts
+        # For non-GOLD futures, add :USDT suffix if missing
         if self.market_type == 'futures':
-            # Ensure it has the :USDT suffix for futures
-            if not symbol.endswith(':USDT'):
-                base = symbol.split('/')[0]  # e.g., 'XAUT'
-                symbol = f"{base}/USDT:USDT"
+            if '/' in symbol and ':' not in symbol:
+                # Add settlement currency for standard futures
+                base_quote = symbol.split('/')
+                if len(base_quote) == 2:
+                    quote = base_quote[1]
+                    symbol = f"{base_quote[0]}/{quote}:{quote}"
         
         return symbol
     

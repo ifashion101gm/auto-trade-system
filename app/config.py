@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     
     # Gold Futures Trading Configuration
     GOLD_SYMBOL_BINANCE: str = "PAXG/USDT"  # Paxos Gold on Binance Testnet (legacy)
-    GOLD_SYMBOL_MEXC: str = "XAUT/USDT"     # Tether Gold on MEXC (primary)
+    GOLD_SYMBOL_MEXC: str = "GOLD(XAUT)/USDT"  # Tether Gold on MEXC Futures (primary)
     GOLD_MAX_LEVERAGE: int = 5
     GOLD_RISK_PER_TRADE: float = 0.01
     GOLD_MIN_CONFIDENCE: float = 0.65
