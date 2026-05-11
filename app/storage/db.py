@@ -15,9 +15,13 @@ logger = get_logger(__name__)
 # Database URL from environment variable via centralized config
 DATABASE_URL = settings.DATABASE_URL
 
-# Create async engine
+# Create async engine with connection pooling
 engine = create_async_engine(
     DATABASE_URL,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_timeout=settings.DB_POOL_TIMEOUT,
+    pool_pre_ping=True,  # Enable connection health checks
     echo=False,  # Set to True for SQL debugging
     future=True,
 )

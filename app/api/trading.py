@@ -648,3 +648,54 @@ async def get_trade_history(
             for t in trades
         ]
     }
+
+
+# =============================================================================
+# Multi-Agent Trading System Endpoints (New)
+# =============================================================================
+
+@router.post("/trades/execute")
+async def execute_trade_endpoint(
+    proposal: dict,
+    mode: str = "DEMO",
+    db_session: AsyncSession = Depends(get_session)
+):
+    """Execute a trade proposal using multi-agent system."""
+    from app.agents.execution_agent import ExecutionAgent
+    agent = ExecutionAgent()
+    result = await agent.execute_trade(proposal, mode, db_session)
+    return result
+
+
+@router.post("/trades/{trade_id}/close")
+async def close_trade_endpoint(
+    trade_id: str,
+    db_session: AsyncSession = Depends(get_session)
+):
+    """Close an open trade."""
+    from app.agents.execution_agent import ExecutionAgent
+    agent = ExecutionAgent()
+    result = await agent.close_trade(trade_id, db_session)
+    return result
+
+
+@router.get("/analytics/daily")
+async def get_daily_analytics(
+    db_session: AsyncSession = Depends(get_session)
+):
+    """Get daily performance analytics."""
+    from app.agents.analytics_agent import AnalyticsAgent
+    agent = AnalyticsAgent()
+    return await agent.calculate_daily_performance(db_session)
+
+
+@router.post("/reconciliation/run")
+async def run_reconciliation(
+    mode: str = "DEMO",
+    db_session: AsyncSession = Depends(get_session)
+):
+    """Manually trigger reconciliation."""
+    from app.services.reconciliation_service import ReconciliationService
+    service = ReconciliationService()
+    await service.reconcile(mode, db_session)
+    return {"status": "completed"}

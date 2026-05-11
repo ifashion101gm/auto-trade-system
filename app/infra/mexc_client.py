@@ -32,7 +32,8 @@ class MEXCClient:
         self,
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
-        market_type: str = "futures"
+        market_type: str = "futures",
+        testnet: bool = False
     ):
         """
         Initialize MEXC client.
@@ -41,28 +42,43 @@ class MEXCClient:
             api_key: MEXC API key
             api_secret: MEXC API secret
             market_type: 'spot' or 'futures'
+            testnet: Use testnet endpoints (default: False)
         """
         import ccxt.async_support as ccxt
         
         self.api_key = api_key or settings.MEXC_API_KEY
         self.api_secret = api_secret or settings.MEXC_API_SECRET
         self.market_type = market_type or settings.MEXC_DEFAULT_MARKET_TYPE
+        self.testnet = testnet
         
         if not self.api_key or not self.api_secret:
             raise ValueError("MEXC API credentials not configured")
         
         # Initialize ccxt exchange
         # MEXC uses 'swap' for perpetual futures, 'spot' for spot markets
-        self.exchange = ccxt.mexc({
+        exchange_config = {
             'apiKey': self.api_key,
             'secret': self.api_secret,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'swap' if self.market_type == 'futures' else 'spot'
             }
-        })
+        }
         
-        logger.info(f"✅ MEXC Client initialized ({self.market_type.upper()})")
+        # Use testnet endpoints if enabled
+        if self.testnet:
+            exchange_config['urls'] = {
+                'api': {
+                    'public': 'https://contract.testnet.mexc.com/api/v1/public',
+                    'private': 'https://contract.testnet.mexc.com/api/v1/private',
+                }
+            }
+            logger.info("🧪 MEXC Testnet mode enabled")
+        
+        self.exchange = ccxt.mexc(exchange_config)
+        
+        mode = "TESTNET" if self.testnet else "LIVE"
+        logger.info(f"✅ MEXC Client initialized ({self.market_type.upper()} - {mode})")
     
     async def close(self):
         """Close exchange connection."""
@@ -131,9 +147,12 @@ class MEXCClient:
             'Content-Type': 'application/json'
         }
         
+        # Determine API base URL
+        base_url = 'https://contract.testnet.mexc.com' if self.testnet else 'https://contract.mexc.com'
+        
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                'https://contract.mexc.com/api/v1/private/account/assets',
+                f'{base_url}/api/v1/private/account/assets',
                 headers=headers,
                 json=body_dict,  # Send body without 'sign' field
                 timeout=aiohttp.ClientTimeout(total=10)

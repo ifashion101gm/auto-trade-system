@@ -2,7 +2,7 @@
 SQLAlchemy ORM models for the Auto Trade System.
 Aligned with migrations/versions/001_initial_schema.py
 """
-from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Index, DateTime
 from app.storage.db import Base
 
 
@@ -274,3 +274,112 @@ class SchemaMigrations(Base):
     version = Column(Text, nullable=False, unique=True)
     applied_at = Column(Text, nullable=False)
     description = Column(Text, nullable=True)
+
+
+# =============================================================================
+# Multi-Agent Trading System Models (New)
+# =============================================================================
+
+
+class Trades(Base):
+    """Enhanced trades table for multi-agent system with complete state machine."""
+    __tablename__ = 'trades'
+
+    id = Column(String(36), primary_key=True)
+    mode = Column(String(10), nullable=False)  # 'LIVE' or 'DEMO'
+    exchange = Column(String(20), nullable=False)
+    symbol = Column(String(20), nullable=False)
+    side = Column(String(10), nullable=False)  # 'LONG' or 'SHORT'
+    status = Column(String(20), nullable=False)  # PENDING, OPEN, PARTIAL, TP_HIT, SL_HIT, CLOSED, ERROR, CANCELLED
+    entry_price = Column(Float, nullable=False)
+    current_price = Column(Float, nullable=False)
+    exit_price = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    leverage = Column(Integer, nullable=False)
+    quantity = Column(Float, nullable=False)
+    filled_quantity = Column(Float, nullable=True)  # Track partial fills
+    pnl = Column(Float, nullable=True)
+    pnl_pct = Column(Float, nullable=True)
+    exchange_order_id = Column(String(100), nullable=True)
+    strategy_name = Column(String(100), nullable=True)
+    regime = Column(String(50), nullable=True)
+    confidence = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)  # Store error details
+    created_at = Column(Text, nullable=False)
+    updated_at = Column(Text, nullable=True)
+    closed_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index('idx_trades_status', 'status'),
+        Index('idx_trades_symbol', 'symbol'),
+        Index('idx_trades_created_at', 'created_at'),
+    )
+
+
+class Positions(Base):
+    """Real-time position tracking with sync source."""
+    __tablename__ = 'positions'
+
+    id = Column(String(36), primary_key=True)
+    trade_id = Column(String(36), nullable=True)
+    symbol = Column(String(20), nullable=False)
+    size = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=False)
+    current_price = Column(Float, nullable=False)
+    unrealized_pnl = Column(Float, nullable=False)
+    realized_pnl = Column(Float, nullable=True)  # For partial closes
+    liquidation_price = Column(Float, nullable=True)
+    leverage = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False)  # 'open', 'partial', 'closed'
+    last_sync = Column(DateTime, nullable=True)
+    sync_source = Column(String(20), nullable=True)  # 'websocket', 'rest', 'recovery'
+
+    __table_args__ = (
+        Index('idx_positions_status', 'status'),
+        Index('idx_positions_symbol', 'symbol'),
+    )
+
+
+class OrderEvents(Base):
+    """Event sourcing for order lifecycle."""
+    __tablename__ = 'order_events'
+
+    id = Column(String(36), primary_key=True)
+    trade_id = Column(String(36), nullable=True)
+    event_type = Column(String(50), nullable=False)
+    payload = Column(Text, nullable=False)  # JSON string
+    created_at = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index('idx_order_events_trade_id', 'trade_id'),
+        Index('idx_order_events_type', 'event_type'),
+    )
+
+
+class SyncLogs(Base):
+    """Reconciliation tracking logs."""
+    __tablename__ = 'sync_logs'
+
+    id = Column(String(36), primary_key=True)
+    timestamp = Column(Text, nullable=False)
+    source = Column(String(20), nullable=False)  # 'mexc_live', 'mexc_demo'
+    event_type = Column(String(50), nullable=False)
+    data = Column(Text, nullable=False)  # JSON string
+    processed = Column(Integer, nullable=False, server_default='0')
+
+    __table_args__ = (
+        Index('idx_sync_logs_timestamp', 'timestamp'),
+    )
+
+
+class TelegramNotifications(Base):
+    """Telegram notification history."""
+    __tablename__ = 'telegram_notifications'
+
+    id = Column(String(36), primary_key=True)
+    timestamp = Column(Text, nullable=False)
+    message_type = Column(String(50), nullable=False)
+    content = Column(Text, nullable=False)
+    sent = Column(Integer, nullable=False, server_default='0')
+    error = Column(Text, nullable=True)

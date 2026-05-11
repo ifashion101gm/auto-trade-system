@@ -10,10 +10,14 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Database
-    DATABASE_URL: str = "sqlite+aiosqlite:///./data/vmassit.db"
+    DATABASE_URL: str = "postgresql+asyncpg://user:password@localhost:5432/vmassit"
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    DB_POOL_TIMEOUT: int = 30
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
+    REDIS_EVENT_CHANNEL_PREFIX: str = "trading:"
     
     # Trading API
     TRADING_API_SECRET: Optional[str] = None

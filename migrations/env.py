@@ -2,10 +2,14 @@ from logging.config import fileConfig
 import os
 import sys
 from pathlib import Path
+from dotenv import load_dotenv
 
 from sqlalchemy import engine_from_config, pool, create_engine
 
 from alembic import context
+
+# Load environment variables from .env file
+load_dotenv(Path(__file__).resolve().parent.parent / '.env')
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -72,11 +76,16 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    # Get database URL from environment variable
+    database_url = os.getenv('DATABASE_URL')
+    if not database_url:
+        raise ValueError("DATABASE_URL environment variable not set")
+    
+    # Convert asyncpg URL to psycopg2 for synchronous migrations
+    if database_url.startswith('postgresql+asyncpg://'):
+        database_url = database_url.replace('postgresql+asyncpg://', 'postgresql://')
+    
+    connectable = create_engine(database_url, poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
         context.configure(
