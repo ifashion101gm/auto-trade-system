@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     GOLD_RISK_PER_TRADE: float = 0.01
     GOLD_MIN_CONFIDENCE: float = 0.65
     
+    # Live Trading Safety Limits
+    LIVE_TRADING_MAX_LEVERAGE: int = 3  # Max leverage for live trading (conservative)
+    LIVE_TRADING_MAX_POSITION_USD: float = 500.0  # Max position size in USD
+    LIVE_TRADING_MIN_BALANCE_USD: float = 100.0  # Minimum balance required
+    VALIDATION_MODE_MAX_POSITION_USD: float = 50.0  # Max for validation tests
+    
     # Trading Profile Configuration
     TRADING_PROFILE: str = "safer_growth"  # Options: safer_growth, aggressive
     
@@ -92,6 +98,39 @@ class Settings(BaseSettings):
     # General
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
+    
+    # =========================================================================
+    # Execution Layer Architecture (New)
+    # =========================================================================
+    
+    # Event Bus Configuration
+    EVENT_BUS_MAX_QUEUE_SIZE: int = 10000
+    EVENT_BATCH_INTERVAL_MS: int = 100  # Batch high-frequency events
+    
+    # WebSocket Configuration
+    WEBSOCKET_HEARTBEAT_INTERVAL: int = 30  # seconds
+    WEBSOCKET_HEARTBEAT_TIMEOUT: int = 45  # seconds
+    WEBSOCKET_RECONNECT_DELAY: int = 2  # initial delay in seconds
+    WEBSOCKET_MAX_RECONNECT_DELAY: int = 60  # max delay in seconds
+    
+    # Circuit Breaker Configuration
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT: int = 60  # seconds
+    
+    # Rate Limiter Configuration
+    RATE_LIMIT_MAX_CALLS: int = 10
+    RATE_LIMIT_TIME_WINDOW: float = 1.0  # seconds
+    
+    # Retry Configuration
+    MAX_RETRIES: int = 3
+    BASE_RETRY_DELAY: float = 1.0  # seconds
+    MAX_RETRY_DELAY: float = 30.0  # seconds
+    
+    # Position Monitor Configuration
+    POSITION_CHECK_INTERVAL: float = 5.0  # seconds
+    
+    # Reconciliation Configuration
+    RECONCILIATION_INTERVAL_SECONDS: int = 120  # Run every 2 minutes
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),

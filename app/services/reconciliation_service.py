@@ -82,6 +82,9 @@ class ReconciliationService:
             # Case 4: Verify open trades match positions
             await self._verify_trade_position_consistency(mode, db_session)
             
+            # Case 5: Detect orphaned orders (trades in DB but not on exchange)
+            await self._detect_orphaned_orders(mode, db_session)
+            
             if mismatches_found == 0:
                 logger.info("✅ Reconciliation: No mismatches found")
             else:
@@ -186,3 +189,69 @@ class ReconciliationService:
         for symbol in missing_positions:
             logger.warning(f"Trade without position: {symbol}")
             # This could indicate a partially filled order or sync issue
+    
+    async def _detect_orphaned_orders(self, mode, db_session):
+        """
+        Detect trades that exist in database but not on exchange.
+        
+        These are typically:
+        - Cancelled orders not synced
+        - Failed orders still marked as OPEN
+        - Manual interventions on exchange
+        """
+        try:
+            from app.infra.exchange_manager import UnifiedExchangeManager
+            from app.config import settings
+            
+            # Get open trades from DB
+            open_trades = await self.trade_repo.get_open_trades(db_session)
+            
+            if not open_trades:
+                return
+            
+            # Fetch open orders from exchange
+            exchange_manager = UnifiedExchangeManager(
+                exchange_name=settings.ACTIVE_EXCHANGE,
+                use_testnet=settings.BINANCE_TESTNET
+            )
+            
+            exchange_orders = await exchange_manager.fetch_open_orders()
+            exchange_order_ids = {
+                order.get('id') or order.get('orderId') 
+                for order in exchange_orders
+            }
+            
+            # Find orphaned trades
+            orphaned_trades = [
+                trade for trade in open_trades
+                if trade.exchange_order_id and trade.exchange_order_id not in exchange_order_ids
+            ]
+            
+            for trade in orphaned_trades:
+                logger.warning(
+                    f"⚠️  Orphaned trade in reconciliation: {trade.id} "
+                    f"(order {trade.exchange_order_id} not found on exchange)"
+                )
+                
+                # Mark as orphaned
+                trade.status = 'ORPHANED'
+                trade.error_message = (
+                    f'Order not found on exchange during reconciliation. '
+                    f'May need manual closure.'
+                )
+                
+                # Publish event
+                await event_bus.publish(SYNC_MISMATCH, {
+                    'type': 'orphaned_trade_reconciliation',
+                    'trade_id': trade.id,
+                    'order_id': trade.exchange_order_id,
+                    'symbol': trade.symbol,
+                    'mode': mode
+                }, priority=5)
+            
+            if orphaned_trades:
+                await db_session.commit()
+                logger.warning(f"Reconciliation found {len(orphaned_trades)} orphaned trades")
+        
+        except Exception as e:
+            logger.error(f"Orphaned order detection in reconciliation failed: {e}")

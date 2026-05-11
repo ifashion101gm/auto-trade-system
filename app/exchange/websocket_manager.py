@@ -1,11 +1,16 @@
 """
 MEXC WebSocket Manager for real-time market data and position updates.
 Handles connection management, reconnection logic, and event publishing.
+Enhanced with heartbeat monitoring and graceful degradation.
+
+Inspired by Hummingbot's WebSocket reliability patterns.
 """
 import websockets
 import json
 import asyncio
-from typing import List, Dict
+import time
+from typing import List, Dict, Optional
+from collections import deque
 from app.events.event_bus import event_bus
 from app.events.event_types import (
     SYNC_RECEIVED, POSITION_UPDATED, ORDER_FILLED, 
@@ -36,6 +41,19 @@ class MEXCWebSocketManager:
         self.running = False
         self.reconnect_delay = 2
         self.max_reconnect_delay = 60
+        
+        # Heartbeat monitoring
+        self.last_heartbeat: Optional[float] = None
+        self.heartbeat_interval = 30  # seconds
+        self.heartbeat_timeout = 45  # seconds
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        
+        # Message latency tracking
+        self.message_latency_samples: deque = deque(maxlen=100)
+        
+        # Fallback REST polling
+        self.use_rest_fallback = False
+        self._rest_polling_task: Optional[asyncio.Task] = None
     
     def _get_ws_url(self) -> str:
         """Get WebSocket URL based on market type."""
@@ -55,6 +73,9 @@ class MEXCWebSocketManager:
                 
                 # Resubscribe to all channels
                 await self._resubscribe()
+                
+                # Start heartbeat monitoring
+                self._heartbeat_task = asyncio.create_task(self._monitor_heartbeat())
                 
                 # Publish reconnection event
                 await event_bus.publish(WEBSOCKET_RECONNECTED, {
@@ -106,6 +127,9 @@ class MEXCWebSocketManager:
     async def _handle_message(self, data: dict):
         """Process incoming WebSocket message."""
         try:
+            # Update last heartbeat timestamp
+            self.last_heartbeat = time.time()
+            
             channel = data.get('c', '')
             
             if 'position' in channel or 'pos' in channel:
@@ -215,6 +239,49 @@ class MEXCWebSocketManager:
                 logger.debug(f"Resubscribed to {subscription['params']}")
             except Exception as e:
                 logger.error(f"Failed to resubscribe: {e}")
+    
+    async def _monitor_heartbeat(self):
+        """Monitor WebSocket connection health via heartbeat."""
+        while self.running:
+            try:
+                await asyncio.sleep(self.heartbeat_interval)
+                
+                # Check if we've received a message recently
+                if self.last_heartbeat and (time.time() - self.last_heartbeat) > self.heartbeat_timeout:
+                    logger.warning("⚠️  Heartbeat timeout, forcing reconnect")
+                    await self._handle_reconnect()
+                    break
+                
+                # Send ping to keep connection alive
+                if self.websocket:
+                    try:
+                        await self.websocket.ping()
+                        logger.debug("💓 Heartbeat ping sent")
+                    except Exception as e:
+                        logger.warning(f"Heartbeat ping failed: {e}")
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Heartbeat monitor error: {e}")
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get WebSocket manager metrics."""
+        avg_latency = (
+            sum(self.message_latency_samples) / len(self.message_latency_samples)
+            if self.message_latency_samples else 0
+        )
+        
+        return {
+            'connected': self.websocket is not None,
+            'subscriptions_count': len(self.subscriptions),
+            'avg_message_latency_ms': round(avg_latency, 2),
+            'last_heartbeat_age_s': (
+                round(time.time() - self.last_heartbeat, 2)
+                if self.last_heartbeat else None
+            ),
+            'use_rest_fallback': self.use_rest_fallback
+        }
     
     async def disconnect(self):
         """Close WebSocket connection gracefully."""

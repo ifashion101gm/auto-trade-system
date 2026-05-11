@@ -1,6 +1,7 @@
 """
 Abstract base class for all exchange implementations.
 Ensures consistent interface across LIVE and DEMO modes.
+Follows CCXT unified API standards for exchange abstraction.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
@@ -10,39 +11,66 @@ class BaseExchange(ABC):
     """
     Abstract base class for all exchange implementations.
     Ensures consistent interface across LIVE and DEMO modes.
+    
+    This follows CCXT's unified API pattern to enable:
+    - Multi-exchange support without code duplication
+    - Consistent order lifecycle management
+    - Standardized error handling and retries
     """
     
+    # =========================================================================
+    # Market Data Methods
+    # =========================================================================
+    
     @abstractmethod
-    async def open_position(
-        self,
-        symbol: str,
-        side: str,
-        amount: float,
-        leverage: int = 1,
-        stop_loss: Optional[float] = None,
-        take_profit: Optional[float] = None
-    ) -> Dict[str, Any]:
-        """Open a position (market order)."""
+    async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
+        """Get real-time ticker data."""
         pass
     
     @abstractmethod
-    async def close_position(self, symbol: str, trade_id: str) -> Dict[str, Any]:
-        """Close an existing position."""
+    async def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> List[List]:
+        """Fetch OHLCV candlestick data."""
         pass
     
     @abstractmethod
-    async def get_positions(self) -> List[Dict[str, Any]]:
-        """Get all open positions."""
+    async def fetch_markets(self) -> List[Dict[str, Any]]:
+        """Fetch available trading pairs/markets."""
         pass
+    
+    # =========================================================================
+    # Account & Balance Methods
+    # =========================================================================
     
     @abstractmethod
     async def get_balance(self) -> Dict[str, Any]:
         """Get account balance."""
         pass
     
+    # =========================================================================
+    # Order Management Methods
+    # =========================================================================
+    
     @abstractmethod
-    async def get_ticker(self, symbol: str) -> Dict[str, Any]:
-        """Get real-time ticker data."""
+    async def create_market_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Create a market order."""
+        pass
+    
+    @abstractmethod
+    async def create_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        price: float,
+        params: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Create a limit order."""
         pass
     
     @abstractmethod
@@ -50,8 +78,90 @@ class BaseExchange(ABC):
         """Cancel an open order."""
         pass
     
+    @abstractmethod
+    async def fetch_order_status(self, order_id: str, symbol: str) -> Dict[str, Any]:
+        """Fetch current order status."""
+        pass
+    
+    @abstractmethod
+    async def fetch_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetch all open orders, optionally filtered by symbol."""
+        pass
+    
+    @abstractmethod
+    async def fetch_order_history(
+        self,
+        symbol: str,
+        since: Optional[int] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch historical orders."""
+        pass
+    
+    # =========================================================================
+    # Position Management Methods
+    # =========================================================================
+    
+    @abstractmethod
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        """Get all open positions."""
+        pass
+    
+    @abstractmethod
+    async def close_position(self, symbol: str) -> Dict[str, Any]:
+        """Close an existing position."""
+        pass
+    
+    @abstractmethod
+    async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        """Set leverage for a specific trading pair."""
+        pass
+    
+    # =========================================================================
+    # Feature Flags (CCXT Pattern)
+    # =========================================================================
+    
+    @property
+    @abstractmethod
+    def has_watch_ohlcv(self) -> bool:
+        """Indicates if exchange supports real-time OHLCV streaming."""
+        pass
+    
+    @property
+    @abstractmethod
+    def has_create_stop_loss_limit(self) -> bool:
+        """Indicates if exchange supports stop-loss limit orders."""
+        pass
+    
     @property
     @abstractmethod
     def mode(self) -> str:
         """Return exchange mode: 'LIVE' or 'DEMO'."""
+        pass
+    
+    # =========================================================================
+    # Utility Methods
+    # =========================================================================
+    
+    @abstractmethod
+    def calculate_fee(
+        self,
+        symbol: str,
+        order_type: str,
+        side: str,
+        amount: float,
+        price: float,
+        taker_or_maker: str = 'taker'
+    ) -> float:
+        """Calculate trading fee for an order."""
+        pass
+    
+    @abstractmethod
+    async def validate_symbol(self, symbol: str) -> bool:
+        """Check if symbol is available on this exchange."""
+        pass
+    
+    @abstractmethod
+    async def close(self):
+        """Close exchange connection gracefully."""
         pass

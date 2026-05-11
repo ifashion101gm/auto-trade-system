@@ -1,7 +1,9 @@
 """
 Main FastAPI application with multi-agent orchestration.
+Enhanced with execution layer architecture upgrade.
 """
 import asyncio
+from datetime import datetime
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.api import trading, ai, cache, llm
@@ -11,6 +13,8 @@ from app.agents.sync_agent import SyncAgent
 from app.services.recovery_service import RecoveryService
 from app.services.reconciliation_service import ReconciliationService
 from app.agents.telegram_agent import TelegramAgent
+from app.events.event_bus import event_bus
+from app.events.event_store import event_store
 
 logger = get_logger(__name__)
 
@@ -27,6 +31,28 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     logger.info("✅ PostgreSQL database initialized")
+    
+    # Initialize EventBus with background processing
+    await event_bus.start_processing()
+    logger.info("✅ EventBus started with priority processing")
+    
+    # Subscribe EventStore to persist critical events
+    async def persist_critical_events(event):
+        async for db_session in get_session():
+            await event_store.persist_event(event, db_session)
+            break
+    
+    # Subscribe to all critical event types
+    from app.events.event_types import (
+        ORDER_FILLED, ORDER_PARTIALLY_FILLED, ORDER_CANCELLED,
+        POSITION_UPDATED, SYNC_MISMATCH, SYNC_REPAIRED, STATE_CHANGED
+    )
+    
+    for event_type in [ORDER_FILLED, ORDER_PARTIALLY_FILLED, ORDER_CANCELLED,
+                       POSITION_UPDATED, SYNC_MISMATCH, SYNC_REPAIRED, STATE_CHANGED]:
+        event_bus.subscribe(event_type, persist_critical_events, priority=20)
+    
+    logger.info("✅ EventStore subscribed to critical events")
     
     # Initialize agents
     global telegram_agent, sync_agent
@@ -64,6 +90,9 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    await event_bus.stop_processing()
+    logger.info("🛑 EventBus stopped")
+    
     await sync_agent.stop()
     logger.info("🛑 Shutting down...")
 
@@ -91,4 +120,13 @@ async def root():
         "message": "Auto Trade System - Multi-Agent Architecture",
         "docs": "/docs",
         "version": "2.0.0"
+    }
+
+@app.get("/metrics")
+async def get_system_metrics():
+    """Get comprehensive system metrics from all components."""
+    return {
+        "event_bus": event_bus.get_metrics(),
+        "websocket": sync_agent.websocket_manager.get_metrics() if sync_agent else None,
+        "timestamp": datetime.utcnow().isoformat()
     }

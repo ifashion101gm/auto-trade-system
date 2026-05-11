@@ -1,13 +1,14 @@
 """
 Live Trading Service integrating AI decisions with real exchange execution.
 Implements complete cycle: Market Data → AI Analysis → Order Execution → Learning
+Enhanced with state machine pattern for predictable execution flow.
 """
 import asyncio
 import time
 import json
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -20,6 +21,8 @@ from app.infra.trade_validator import TradeValidator
 from app.storage.models import PaperTrades, DecisionJournal, StrategyEvaluations, TradeProposals
 from app.learning.param_cache import LearningParameterCache
 from app.logging_config import get_logger
+from app.services.execution_states import ExecutionState, is_valid_transition
+from app.events.event_bus import event_bus
 
 logger = get_logger(__name__)
 
@@ -65,10 +68,65 @@ class LiveTradingService:
         self.validator = TradeValidator()
         self.param_cache = LearningParameterCache()
         
+        # State machine tracking
+        self.current_state = ExecutionState.IDLE
+        self.state_history: List[Tuple[ExecutionState, datetime]] = []
+        
         logger.info("✅ Live Trading Service initialized")
         logger.info(f"   Exchange: {self.exchange_name.upper()} ({'TESTNET' if self.use_testnet else 'LIVE'})")
         logger.info(f"   Mode: {self.execution_mode}")
         logger.info(f"   AI: {'OpenRouter' if use_openrouter else 'Heuristic'}")
+        logger.info(f"   State Machine: Enabled")
+    
+    async def _transition_to(self, new_state: ExecutionState):
+        """
+        Transition to a new execution state with validation.
+        
+        Args:
+            new_state: Target state to transition to
+            
+        Raises:
+            ValueError: If transition is not valid
+        """
+        old_state = self.current_state
+        
+        # Validate transition
+        if not is_valid_transition(old_state, new_state):
+            raise ValueError(
+                f"Invalid state transition: {old_state.value} -> {new_state.value}. "
+                f"Allowed transitions: {[s.value for s in is_valid_transition.__globals__.get('VALID_TRANSITIONS', {}).get(old_state, [])]}"
+            )
+        
+        # Perform transition
+        self.current_state = new_state
+        self.state_history.append((new_state, datetime.utcnow()))
+        
+        # Publish state change event (non-blocking)
+        try:
+            asyncio.create_task(event_bus.publish(
+                'STATE_CHANGED',
+                {
+                    'old_state': old_state.value,
+                    'new_state': new_state.value,
+                    'timestamp': datetime.utcnow().isoformat()
+                },
+                priority=15
+            ))
+        except Exception as e:
+            logger.warning(f"Failed to publish state change event: {e}")
+        
+        logger.debug(f"🔄 State transition: {old_state.value} -> {new_state.value}")
+    
+    def get_state_metrics(self) -> Dict[str, Any]:
+        """Get state machine metrics."""
+        return {
+            'current_state': self.current_state.value,
+            'total_transitions': len(self.state_history),
+            'recent_states': [
+                {'state': s.value, 'timestamp': t.isoformat()}
+                for s, t in self.state_history[-10:]
+            ]
+        }
     
     async def execute_trading_cycle(
         self,
@@ -99,12 +157,18 @@ class LiveTradingService:
         }
         
         try:
+            # Transition: IDLE -> FETCHING_DATA
+            await self._transition_to(ExecutionState.FETCHING_DATA)
+            
             # Stage 1: Fetch Real Market Data
             logger.info(f"\n📊 Stage 1: Fetching market data for {symbol}...")
             market_data = await self._fetch_market_data(symbol)
             results['stages']['market_data'] = 'success'
             results['market_data'] = market_data
             logger.info(f"   ✅ Current price: ${market_data['current_price']:,.2f}")
+            
+            # Transition: FETCHING_DATA -> ANALYZING
+            await self._transition_to(ExecutionState.ANALYZING)
             
             # Stage 2: AI Analysis with OpenRouter
             logger.info("\n🧠 Stage 2: Running AI analysis...")
@@ -153,6 +217,9 @@ class LiveTradingService:
             logger.info(f"   ✅ Strategy: {ai_result['strategy']['strategy']} (confidence: {ai_result['strategy']['confidence']})")
             logger.info(f"   ✅ Risk: {ai_result['risk']['risk_level']}")
             
+            # Transition: ANALYZING -> PROPOSING
+            await self._transition_to(ExecutionState.PROPOSING)
+            
             # Stage 3: Generate Trade Proposal
             proposal = ai_result['trade_proposal']
             logger.info("\n📋 Stage 3: Trade proposal generated")
@@ -161,6 +228,9 @@ class LiveTradingService:
             logger.info(f"   Stop Loss: ${proposal['stop_loss']:,.2f}")
             logger.info(f"   Take Profit: ${proposal['take_profit']:,.2f}")
             logger.info(f"   Leverage: {proposal['leverage']}x")
+            
+            # Transition: PROPOSING -> VALIDATING
+            await self._transition_to(ExecutionState.VALIDATING)
             
             # Stage 4: Execute Order (based on execution mode)
             logger.info(f"\n⚡ Stage 4: Executing order (mode: {self.execution_mode})...")
@@ -174,6 +244,10 @@ class LiveTradingService:
             results['execution'] = execution_result
             
             if execution_result['status'] == 'executed':
+                # Transition: VALIDATING -> EXECUTING -> MONITORING
+                await self._transition_to(ExecutionState.EXECUTING)
+                await self._transition_to(ExecutionState.MONITORING)
+                
                 logger.info(f"   ✅ Order executed: {execution_result.get('order_id')}")
                 logger.info(f"   ✅ Filled at: ${execution_result.get('filled_price', 0):,.2f}")
                 
@@ -192,6 +266,9 @@ class LiveTradingService:
                 results['stages']['learning'] = 'completed'
                 results['learning'] = learning_result
             
+            # Transition: MONITORING -> IDLE (cycle complete)
+            await self._transition_to(ExecutionState.IDLE)
+            
             results['status'] = 'success'
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
             
@@ -199,6 +276,12 @@ class LiveTradingService:
             return results
             
         except Exception as e:
+            # Transition to ERROR state
+            try:
+                await self._transition_to(ExecutionState.ERROR)
+            except:
+                pass  # Ignore transition errors during exception handling
+            
             results['status'] = 'failed'
             results['error'] = str(e)
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
@@ -297,6 +380,17 @@ class LiveTradingService:
         entry_price = proposal['entry_price']
         quantity = proposal['quantity']
         leverage = proposal['leverage']
+        
+        # Check minimum balance for live trading
+        if not self.use_testnet:
+            try:
+                balance = await self.exchange_manager.fetch_balance()
+                if balance['total_usdt'] < settings.LIVE_TRADING_MIN_BALANCE_USD:
+                    error_msg = f"Insufficient balance: ${balance['total_usdt']:.2f} < ${settings.LIVE_TRADING_MIN_BALANCE_USD:.2f}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+            except Exception as e:
+                logger.warning(f"Could not verify balance: {e}. Proceeding with caution.")
         
         # Calculate position value in USD
         position_value_usd = entry_price * quantity
@@ -490,6 +584,24 @@ class LiveTradingService:
         # Execute order if auto-execution is enabled
         if should_auto_execute:
             try:
+                # Validate position size against safety limits
+                max_position_usd = (
+                    settings.VALIDATION_MODE_MAX_POSITION_USD 
+                    if self.use_testnet 
+                    else settings.LIVE_TRADING_MAX_POSITION_USD
+                )
+                
+                if position_value_usd > max_position_usd:
+                    error_msg = f"Position value ${position_value_usd:.2f} exceeds safety limit ${max_position_usd:.2f}"
+                    logger.error(error_msg)
+                    
+                    # Send alert via Telegram
+                    await self.notifier.send_message(
+                        f"🚨 SAFETY ALERT: Trade blocked\n{error_msg}\nSymbol: {symbol}\nSide: {side}"
+                    )
+                    
+                    raise ValueError(error_msg)
+                
                 # Place market order
                 order_result = await self.exchange_manager.create_market_order(
                     symbol=symbol,

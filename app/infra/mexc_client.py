@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 import hashlib
 import hmac
 import time
+import asyncio
 import aiohttp
 from app.config import settings
 from app.logging_config import get_logger
@@ -51,6 +52,16 @@ class MEXCClient:
         self.market_type = market_type or settings.MEXC_DEFAULT_MARKET_TYPE
         self.testnet = testnet
         
+        # Retry configuration
+        self.MAX_RETRIES = 3
+        self.BASE_RETRY_DELAY = 1.0  # seconds
+        self.MAX_RETRY_DELAY = 30.0  # seconds
+        self.RETRYABLE_ERRORS = (
+            aiohttp.ClientError,
+            asyncio.TimeoutError,
+            ConnectionError,
+        )
+        
         if not self.api_key or not self.api_secret:
             raise ValueError("MEXC API credentials not configured")
         
@@ -84,13 +95,161 @@ class MEXCClient:
         """Close exchange connection."""
         await self.exchange.close()
     
+    async def health_check(self) -> Dict[str, Any]:
+        """
+        Perform comprehensive health check of MEXC connection.
+        
+        Returns:
+            Dictionary with health status metrics
+        """
+        import time
+        from datetime import datetime
+        
+        health_status = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'exchange': 'mexc',
+            'market_type': self.market_type,
+            'testnet': self.testnet,
+            'status': 'unknown',
+            'checks': {}
+        }
+        
+        start_time = time.time()
+        
+        # Check 1: Balance fetch (connectivity test)
+        try:
+            balance_start = time.time()
+            balance = await self.fetch_balance()
+            balance_latency = time.time() - balance_start
+            
+            health_status['checks']['balance'] = {
+                'status': 'pass',
+                'latency_ms': round(balance_latency * 1000, 2),
+                'total_usdt': balance.get('total_usdt', 0)
+            }
+        except Exception as e:
+            health_status['checks']['balance'] = {
+                'status': 'fail',
+                'error': str(e)
+            }
+        
+        # Check 2: Ticker fetch (market data availability)
+        try:
+            ticker_start = time.time()
+            ticker = await self.fetch_ticker(settings.GOLD_SYMBOL_MEXC)
+            ticker_latency = time.time() - ticker_start
+            
+            health_status['checks']['ticker'] = {
+                'status': 'pass',
+                'latency_ms': round(ticker_latency * 1000, 2),
+                'price': ticker.get('last_price')
+            }
+        except Exception as e:
+            health_status['checks']['ticker'] = {
+                'status': 'fail',
+                'error': str(e)
+            }
+        
+        # Check 3: Position fetch (API permissions)
+        try:
+            positions_start = time.time()
+            positions = await self.fetch_open_positions()
+            positions_latency = time.time() - positions_start
+            
+            health_status['checks']['positions'] = {
+                'status': 'pass',
+                'latency_ms': round(positions_latency * 1000, 2),
+                'open_count': len(positions)
+            }
+        except Exception as e:
+            health_status['checks']['positions'] = {
+                'status': 'fail',
+                'error': str(e)
+            }
+        
+        # Determine overall status
+        total_latency = time.time() - start_time
+        passed_checks = sum(1 for c in health_status['checks'].values() if c['status'] == 'pass')
+        total_checks = len(health_status['checks'])
+        
+        health_status['overall_latency_ms'] = round(total_latency * 1000, 2)
+        health_status['checks_passed'] = f"{passed_checks}/{total_checks}"
+        
+        if passed_checks == total_checks:
+            health_status['status'] = 'healthy'
+        elif passed_checks >= total_checks * 0.6:
+            health_status['status'] = 'degraded'
+        else:
+            health_status['status'] = 'unhealthy'
+        
+        return health_status
+    
+    async def _execute_with_retry(self, operation_name: str, func, *args, **kwargs):
+        """
+        Execute operation with exponential backoff retry logic.
+        
+        Args:
+            operation_name: Name of operation for logging
+            func: Async function to execute
+            *args, **kwargs: Arguments to pass to func
+            
+        Returns:
+            Result from successful execution
+            
+        Raises:
+            Exception: If all retries exhausted
+        """
+        last_exception = None
+        
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                return await func(*args, **kwargs)
+                
+            except self.RETRYABLE_ERRORS as e:
+                last_exception = e
+                
+                if attempt < self.MAX_RETRIES:
+                    # Calculate delay with exponential backoff
+                    delay = min(
+                        self.BASE_RETRY_DELAY * (2 ** (attempt - 1)),
+                        self.MAX_RETRY_DELAY
+                    )
+                    
+                    logger.warning(
+                        f"⚠️  {operation_name} failed (attempt {attempt}/{self.MAX_RETRIES}): {e}. "
+                        f"Retrying in {delay:.1f}s..."
+                    )
+                    
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        f"❌ {operation_name} failed after {self.MAX_RETRIES} attempts. "
+                        f"Last error: {e}"
+                    )
+                    raise Exception(
+                        f"{operation_name} failed after {self.MAX_RETRIES} retries. "
+                        f"Last error: {last_exception}"
+                    )
+            
+            except Exception as e:
+                # Non-retryable errors (e.g., authentication, validation)
+                logger.error(f"❌ {operation_name} failed with non-retryable error: {e}")
+                raise
+    
     async def fetch_balance(self) -> Dict[str, Any]:
         """
-        Fetch account balance using MEXC Futures API v1.
+        Fetch account balance using MEXC Futures API v1 with retry logic.
         
         Returns:
             Dictionary with balance information
         """
+        return await self._execute_with_retry(
+            "fetch_balance",
+            self._fetch_balance_impl
+        )
+    
+    async def _fetch_balance_impl(self) -> Dict[str, Any]:
+        """Internal implementation for fetching balance."""
         try:
             # Try ccxt first
             try:
@@ -155,7 +314,7 @@ class MEXCClient:
                 f'{base_url}/api/v1/private/account/assets',
                 headers=headers,
                 json=body_dict,  # Send body without 'sign' field
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=15)
             ) as resp:
                 data = await resp.json()
                 
@@ -172,7 +331,7 @@ class MEXCClient:
     
     async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         """
-        Fetch real-time ticker data.
+        Fetch real-time ticker data with retry logic.
         
         Args:
             symbol: Trading pair (e.g., 'XAUT_USDT' or 'XAUT/USDT:USDT')
@@ -180,6 +339,14 @@ class MEXCClient:
         Returns:
             Ticker data with price, volume, etc.
         """
+        return await self._execute_with_retry(
+            "fetch_ticker",
+            self._fetch_ticker_impl,
+            symbol
+        )
+    
+    async def _fetch_ticker_impl(self, symbol: str) -> Dict[str, Any]:
+        """Internal implementation for fetching ticker."""
         try:
             # Normalize symbol format for MEXC futures
             normalized_symbol = self._normalize_symbol(symbol)
@@ -320,7 +487,7 @@ class MEXCClient:
         leverage: int = 1
     ) -> Dict[str, Any]:
         """
-        Place a market order.
+        Place a market order with safety checks and retry logic.
         
         Args:
             symbol: Trading pair (e.g., 'XAUT_USDT' or 'BTC/USDT')
@@ -331,7 +498,27 @@ class MEXCClient:
         Returns:
             Order details including ID, status, filled price
         """
+        return await self._execute_with_retry(
+            "create_market_order",
+            self._create_market_order_impl,
+            symbol, side, amount, leverage
+        )
+    
+    async def _create_market_order_impl(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        leverage: int = 1
+    ) -> Dict[str, Any]:
+        """Internal implementation for creating market order."""
         try:
+            # Enforce leverage limits based on environment
+            max_leverage = settings.LIVE_TRADING_MAX_LEVERAGE if not self.testnet else settings.GOLD_MAX_LEVERAGE
+            if leverage > max_leverage:
+                logger.warning(f"Reducing leverage from {leverage}x to {max_leverage}x (safety limit)")
+                leverage = max_leverage
+            
             # Normalize symbol format
             normalized_symbol = self._normalize_symbol(symbol)
             
@@ -470,7 +657,7 @@ class MEXCClient:
     
     async def fetch_open_positions(self) -> List[Dict[str, Any]]:
         """
-        Fetch all open positions (futures only).
+        Fetch all open positions (futures only) with retry logic.
         
         Returns:
             List of open positions
@@ -478,6 +665,13 @@ class MEXCClient:
         if self.market_type != 'futures':
             return []
         
+        return await self._execute_with_retry(
+            "fetch_open_positions",
+            self._fetch_open_positions_impl
+        )
+    
+    async def _fetch_open_positions_impl(self) -> List[Dict[str, Any]]:
+        """Internal implementation for fetching open positions."""
         try:
             positions = await self.exchange.fetch_positions()
             
