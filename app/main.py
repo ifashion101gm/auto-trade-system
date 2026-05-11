@@ -1,10 +1,14 @@
 """
 Main FastAPI application entry point.
 """
+import logging
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from app.api import trading, ai, cache, llm
 from app.storage.db import init_db
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 @asynccontextmanager
@@ -12,12 +16,11 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup: Initialize database
     await init_db()
-    print("✅ Database initialized with WAL mode")
     
     yield
     
     # Shutdown: Cleanup resources
-    print("🛑 Shutting down...")
+    logger.info("🛑 Shutting down...")
 
 
 app = FastAPI(

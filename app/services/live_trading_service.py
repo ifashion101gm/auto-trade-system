@@ -5,6 +5,7 @@ Implements complete cycle: Market Data → AI Analysis → Order Execution → L
 import asyncio
 import time
 import json
+import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +16,12 @@ from app.ai.orchestrator import AIAgentOrchestrator
 from app.infra.exchange_manager import UnifiedExchangeManager
 from app.infra.hybrid_exchange_manager import HybridExchangeManager
 from app.infra.telegram_notifier import TelegramNotifier
+from app.infra.trade_validator import TradeValidator
 from app.storage.models import PaperTrades, DecisionJournal, StrategyEvaluations, TradeProposals
 from app.learning.param_cache import LearningParameterCache
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class LiveTradingService:
@@ -57,12 +62,13 @@ class LiveTradingService:
             use_testnet=self.use_testnet
         )
         self.notifier = TelegramNotifier()
+        self.validator = TradeValidator()
         self.param_cache = LearningParameterCache()
         
-        print(f"✅ Live Trading Service initialized")
-        print(f"   Exchange: {self.exchange_name.upper()} ({'TESTNET' if self.use_testnet else 'LIVE'})")
-        print(f"   Mode: {self.execution_mode}")
-        print(f"   AI: {'OpenRouter' if use_openrouter else 'Heuristic'}")
+        logger.info("✅ Live Trading Service initialized")
+        logger.info(f"   Exchange: {self.exchange_name.upper()} ({'TESTNET' if self.use_testnet else 'LIVE'})")
+        logger.info(f"   Mode: {self.execution_mode}")
+        logger.info(f"   AI: {'OpenRouter' if use_openrouter else 'Heuristic'}")
     
     async def execute_trading_cycle(
         self,
@@ -94,14 +100,14 @@ class LiveTradingService:
         
         try:
             # Stage 1: Fetch Real Market Data
-            print(f"\n📊 Stage 1: Fetching market data for {symbol}...")
+            logger.info(f"\n📊 Stage 1: Fetching market data for {symbol}...")
             market_data = await self._fetch_market_data(symbol)
             results['stages']['market_data'] = 'success'
             results['market_data'] = market_data
-            print(f"   ✅ Current price: ${market_data['current_price']:,.2f}")
+            logger.info(f"   ✅ Current price: ${market_data['current_price']:,.2f}")
             
             # Stage 2: AI Analysis with OpenRouter
-            print(f"\n🧠 Stage 2: Running AI analysis...")
+            logger.info("\n🧠 Stage 2: Running AI analysis...")
             ai_result = await self.orchestrator.run_paper_trade_cycle(
                 market_data=market_data,
                 user_id=user_id,
@@ -113,21 +119,21 @@ class LiveTradingService:
             
             results['stages']['ai_analysis'] = 'success'
             results['ai_result'] = ai_result
-            print(f"   ✅ Regime: {ai_result['regime']}")
-            print(f"   ✅ Strategy: {ai_result['strategy']['strategy']} (confidence: {ai_result['strategy']['confidence']})")
-            print(f"   ✅ Risk: {ai_result['risk']['risk_level']}")
+            logger.info(f"   ✅ Regime: {ai_result['regime']}")
+            logger.info(f"   ✅ Strategy: {ai_result['strategy']['strategy']} (confidence: {ai_result['strategy']['confidence']})")
+            logger.info(f"   ✅ Risk: {ai_result['risk']['risk_level']}")
             
             # Stage 3: Generate Trade Proposal
             proposal = ai_result['trade_proposal']
-            print(f"\n📋 Stage 3: Trade proposal generated")
-            print(f"   Side: {proposal['side']}")
-            print(f"   Entry: ${proposal['entry_price']:,.2f}")
-            print(f"   Stop Loss: ${proposal['stop_loss']:,.2f}")
-            print(f"   Take Profit: ${proposal['take_profit']:,.2f}")
-            print(f"   Leverage: {proposal['leverage']}x")
+            logger.info("\n📋 Stage 3: Trade proposal generated")
+            logger.info(f"   Side: {proposal['side']}")
+            logger.info(f"   Entry: ${proposal['entry_price']:,.2f}")
+            logger.info(f"   Stop Loss: ${proposal['stop_loss']:,.2f}")
+            logger.info(f"   Take Profit: ${proposal['take_profit']:,.2f}")
+            logger.info(f"   Leverage: {proposal['leverage']}x")
             
             # Stage 4: Execute Order (based on execution mode)
-            print(f"\n⚡ Stage 4: Executing order (mode: {self.execution_mode})...")
+            logger.info(f"\n⚡ Stage 4: Executing order (mode: {self.execution_mode})...")
             execution_result = await self._execute_trade(
                 proposal=proposal,
                 user_id=user_id,
@@ -138,16 +144,16 @@ class LiveTradingService:
             results['execution'] = execution_result
             
             if execution_result['status'] == 'executed':
-                print(f"   ✅ Order executed: {execution_result.get('order_id')}")
-                print(f"   ✅ Filled at: ${execution_result.get('filled_price', 0):,.2f}")
+                logger.info(f"   ✅ Order executed: {execution_result.get('order_id')}")
+                logger.info(f"   ✅ Filled at: ${execution_result.get('filled_price', 0):,.2f}")
                 
                 # Stage 5: Send Telegram Notification
-                print(f"\n📱 Stage 5: Sending Telegram notification...")
+                logger.info("\n📱 Stage 5: Sending Telegram notification...")
                 await self.notifier.send_trade_entry(execution_result)
                 results['stages']['notification'] = 'sent'
                 
                 # Stage 6: Self-Learning Analysis
-                print(f"\n🎓 Stage 6: Analyzing for self-learning...")
+                logger.info("\n🎓 Stage 6: Analyzing for self-learning...")
                 learning_result = await self._analyze_and_learn(
                     execution_result=execution_result,
                     ai_result=ai_result,
@@ -159,7 +165,7 @@ class LiveTradingService:
             results['status'] = 'success'
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
             
-            print(f"\n✅ Trading cycle completed in {results['cycle_time_ms']:.0f}ms")
+            logger.info(f"\n✅ Trading cycle completed in {results['cycle_time_ms']:.0f}ms")
             return results
             
         except Exception as e:
@@ -167,9 +173,8 @@ class LiveTradingService:
             results['error'] = str(e)
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
             
-            print(f"\n❌ Trading cycle failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"\n❌ Trading cycle failed: {e}")
+            logger.exception("Traceback:")
             
             # Send error notification
             try:
@@ -297,29 +302,106 @@ class LiveTradingService:
         should_auto_execute = False
         
         if self.execution_mode == 'proposal':
-            # Always require manual execution
+            # Validate trade against rules first
+            validation = await self.validator.validate_trade(
+                proposal=proposal,
+                user_id=user_id,
+                db_session=db_session,
+                exchange=self.exchange_name,
+                symbol=symbol
+            )
+            
+            # Send validation report to Telegram
+            await self.notifier.send_trade_validation_report(validation, proposal)
+            
+            if not validation.approved:
+                logger.warning(f"Trade REJECTED: {validation.violations}")
+                # Update proposal status to rejected
+                if db_session and proposal_id:
+                    from sqlalchemy import select
+                    stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
+                    result = await db_session.execute(stmt)
+                    prop_record = result.scalar_one_or_none()
+                    if prop_record:
+                        prop_record.status = 'rejected'
+                        await db_session.flush()
+                
+                return {
+                    'status': 'rejected',
+                    'proposal_id': proposal_id,
+                    'violations': validation.violations,
+                    'warnings': validation.warnings,
+                    'message': f'Trade rejected: {"; ".join(validation.violations)}',
+                    **validation.proposed_trade
+                }
+            
+            if validation.warnings:
+                logger.warning(f"Trade approved with warnings: {validation.warnings}")
+            
+            # Always require manual execution in proposal mode
             return {
                 'status': 'proposal_only',
                 'proposal_id': proposal_id,
                 'message': 'Trade proposal generated. Manual execution required.',
                 'position_value_usd': position_value_usd,
+                'validation': {
+                    'approved': validation.approved,
+                    'violations': validation.violations,
+                    'warnings': validation.warnings
+                },
                 **proposal
             }
         
         elif self.execution_mode == 'semi-auto':
+            # Validate trade against rules first
+            validation = await self.validator.validate_trade(
+                proposal=proposal,
+                user_id=user_id,
+                db_session=db_session,
+                exchange=self.exchange_name,
+                symbol=symbol
+            )
+            
+            # Send validation report to Telegram
+            await self.notifier.send_trade_validation_report(validation, proposal)
+            
+            if not validation.approved:
+                logger.warning(f"Trade REJECTED: {validation.violations}")
+                # Update proposal status to rejected
+                if db_session and proposal_id:
+                    from sqlalchemy import select
+                    stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
+                    result = await db_session.execute(stmt)
+                    prop_record = result.scalar_one_or_none()
+                    if prop_record:
+                        prop_record.status = 'rejected'
+                        await db_session.commit()
+                
+                return {
+                    'status': 'rejected',
+                    'proposal_id': proposal_id,
+                    'violations': validation.violations,
+                    'warnings': validation.warnings,
+                    'message': f'Trade rejected: {"; ".join(validation.violations)}',
+                    **validation.proposed_trade
+                }
+            
+            if validation.warnings:
+                logger.warning(f"Trade approved with warnings: {validation.warnings}")
+            
             # HYBRID MODE: Check position size threshold
             AUTO_EXECUTE_THRESHOLD_USD = settings.AUTO_EXECUTE_THRESHOLD_USD
             
             if position_value_usd <= AUTO_EXECUTE_THRESHOLD_USD:
                 # Small position: Auto-execute (fully-auto behavior)
                 should_auto_execute = True
-                print(f"   💰 Position value: ${position_value_usd:.2f} ≤ ${AUTO_EXECUTE_THRESHOLD_USD:.2f}")
-                print(f"   ⚡ Auto-executing (small position)")
+                logger.info(f"   💰 Position value: ${position_value_usd:.2f} ≤ ${AUTO_EXECUTE_THRESHOLD_USD:.2f}")
+                logger.info("   ⚡ Auto-executing (small position)")
             else:
                 # Large position: Require confirmation (semi-auto behavior)
                 should_auto_execute = False
-                print(f"   💰 Position value: ${position_value_usd:.2f} > ${AUTO_EXECUTE_THRESHOLD_USD:.2f}")
-                print(f"   ⏸️  Awaiting confirmation (large position)")
+                logger.info(f"   💰 Position value: ${position_value_usd:.2f} > ${AUTO_EXECUTE_THRESHOLD_USD:.2f}")
+                logger.info("   ⏸️  Awaiting confirmation (large position)")
                 
                 if db_session:
                     await db_session.commit()
@@ -333,6 +415,42 @@ class LiveTradingService:
                 }
         
         elif self.execution_mode == 'fully-auto':
+            # Validate trade against rules first
+            validation = await self.validator.validate_trade(
+                proposal=proposal,
+                user_id=user_id,
+                db_session=db_session,
+                exchange=self.exchange_name,
+                symbol=symbol
+            )
+            
+            # Send validation report to Telegram
+            await self.notifier.send_trade_validation_report(validation, proposal)
+            
+            if not validation.approved:
+                logger.warning(f"Trade REJECTED: {validation.violations}")
+                # Update proposal status to rejected
+                if db_session and proposal_id:
+                    from sqlalchemy import select
+                    stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
+                    result = await db_session.execute(stmt)
+                    prop_record = result.scalar_one_or_none()
+                    if prop_record:
+                        prop_record.status = 'rejected'
+                        await db_session.commit()
+                
+                return {
+                    'status': 'rejected',
+                    'proposal_id': proposal_id,
+                    'violations': validation.violations,
+                    'warnings': validation.warnings,
+                    'message': f'Trade rejected: {"; ".join(validation.violations)}',
+                    **validation.proposed_trade
+                }
+            
+            if validation.warnings:
+                logger.warning(f"Trade approved with warnings: {validation.warnings}")
+            
             # Always auto-execute
             should_auto_execute = True
         
@@ -497,12 +615,12 @@ class LiveTradingService:
             db_session.add(decision_entry)
             await db_session.flush()
         
-        print(f"   📊 Slippage: {slippage_pct:.4f}%")
-        print(f"   📊 Execution Quality: {learning_insights['execution_quality']}")
+        logger.info(f"   📊 Slippage: {slippage_pct:.4f}%")
+        logger.info(f"   📊 Execution Quality: {learning_insights['execution_quality']}")
         if recommendations:
-            print(f"   💡 Recommendations:")
+            logger.info("   💡 Recommendations:")
             for rec in recommendations:
-                print(f"      - {rec}")
+                logger.info(f"      - {rec}")
         
         return learning_insights
     
@@ -595,9 +713,10 @@ class LiveTradingService:
         db_session: Optional[AsyncSession] = None
     ) -> Dict[str, Any]:
         """
-        Execute Gold trade on BOTH Binance Testnet (paper) and MEXC (live).
+        Execute Gold trade on MEXC Demo Futures (primary) with optional Binance Testnet comparison.
         
         This implements the hybrid trading strategy for Gold futures comparison.
+        Primary execution is now on MEXC Demo Futures for XAUT/USDT.
         
         Args:
             proposal: Trade proposal from AI orchestrator
@@ -620,27 +739,32 @@ class LiveTradingService:
             quantity = proposal['quantity']
             position_value_usd = entry_price * quantity
             
-            # Apply risk management for live MEXC trades
-            if settings.GOLD_MIN_CONFIDENCE:
-                if proposal.get('confidence', 0) < settings.GOLD_MIN_CONFIDENCE:
-                    raise ValueError(
-                        f"Confidence {proposal.get('confidence')} below minimum "
-                        f"{settings.GOLD_MIN_CONFIDENCE} for Gold trades"
-                    )
+            # Apply risk management for live MEXC trades using TradeValidator
+            validation = await self.validator.validate_trade(
+                proposal=proposal,
+                user_id=user_id,
+                db_session=db_session,
+                exchange="mexc",
+                symbol=settings.GOLD_SYMBOL_MEXC
+            )
             
-            # Check maximum position size for live trades
-            max_leverage = getattr(settings, 'GOLD_MAX_LEVERAGE', 5)
-            if leverage > max_leverage:
-                raise ValueError(
-                    f"Leverage {leverage} exceeds maximum {max_leverage} for Gold"
-                )
+            # Send validation report to Telegram
+            await self.notifier.send_trade_validation_report(validation, proposal)
             
-            print(f"\n🥇 Executing dual Gold trade:")
-            print(f"   Side: {side.upper()}")
-            print(f"   Binance (Paper): {settings.GOLD_SYMBOL_BINANCE}")
-            print(f"   MEXC (Live): {settings.GOLD_SYMBOL_MEXC}")
-            print(f"   Position Value: ${position_value_usd:.2f}")
-            print(f"   Leverage: {leverage}x")
+            if not validation.approved:
+                error_msg = f"Gold trade REJECTED: {'; '.join(validation.violations)}"
+                logger.error(f" {error_msg}")
+                raise ValueError(error_msg)
+            
+            if validation.warnings:
+                logger.warning(f"Gold trade approved with warnings: {validation.warnings}")
+            
+            logger.info(f"\n🥇 Executing dual Gold trade:")
+            logger.info(f"   Side: {side.upper()}")
+            logger.info(f"   MEXC (Primary/Demo): {settings.GOLD_SYMBOL_MEXC}")
+            logger.info(f"   Binance (Comparison/Paper): {settings.GOLD_SYMBOL_BINANCE}")
+            logger.info(f"   Position Value: ${position_value_usd:.2f}")
+            logger.info(f"   Leverage: {leverage}x")
             
             # Execute on both exchanges simultaneously
             result = await hybrid_manager.execute_dual_trade(
@@ -655,37 +779,7 @@ class LiveTradingService:
             mexc_trade_id = None
             
             if db_session:
-                # Record Binance paper trade
-                if result['binance'] and result['binance']['status'] == 'success':
-                    binance_order = result['binance']['order']
-                    binance_trade = PaperTrades(
-                        ts_open=datetime.utcnow().isoformat(),
-                        user_id=user_id,
-                        exchange='binance',
-                        symbol=settings.GOLD_SYMBOL_BINANCE,
-                        side=side.upper(),
-                        leverage=leverage,
-                        qty=quantity,
-                        entry_price=binance_order.get('price') or entry_price,
-                        exit_price=None,
-                        stop_loss=proposal.get('stop_loss'),
-                        take_profit=proposal.get('take_profit'),
-                        profit=None,
-                        profit_pct=None,
-                        status='open',
-                        notes=json.dumps({
-                            'strategy': proposal.get('strategy_name'),
-                            'regime': proposal.get('regime'),
-                            'execution_type': 'paper',
-                            'order_id': binance_order.get('order_id')
-                        }),
-                        execution_mode='paper'
-                    )
-                    db_session.add(binance_trade)
-                    await db_session.flush()
-                    binance_trade_id = binance_trade.id
-                
-                # Record MEXC live trade
+                # Record MEXC demo trade (primary)
                 if result['mexc'] and result['mexc']['status'] == 'success':
                     mexc_order = result['mexc']['order']
                     mexc_trade = PaperTrades(
@@ -706,26 +800,57 @@ class LiveTradingService:
                         notes=json.dumps({
                             'strategy': proposal.get('strategy_name'),
                             'regime': proposal.get('regime'),
-                            'execution_type': 'live',
+                            'execution_type': 'demo_futures',
                             'order_id': mexc_order.get('order_id'),
-                            'paired_with': binance_trade_id
+                            'paired_with': None  # Will be updated below
                         }),
-                        execution_mode='live'
+                        execution_mode='demo'
                     )
                     db_session.add(mexc_trade)
                     await db_session.flush()
                     mexc_trade_id = mexc_trade.id
                 
+                # Record Binance paper trade (comparison)
+                if result['binance'] and result['binance']['status'] == 'success':
+                    binance_order = result['binance']['order']
+                    binance_trade = PaperTrades(
+                        ts_open=datetime.utcnow().isoformat(),
+                        user_id=user_id,
+                        exchange='binance',
+                        symbol=settings.GOLD_SYMBOL_BINANCE,
+                        side=side.upper(),
+                        leverage=leverage,
+                        qty=quantity,
+                        entry_price=binance_order.get('price') or entry_price,
+                        exit_price=None,
+                        stop_loss=proposal.get('stop_loss'),
+                        take_profit=proposal.get('take_profit'),
+                        profit=None,
+                        profit_pct=None,
+                        status='open',
+                        notes=json.dumps({
+                            'strategy': proposal.get('strategy_name'),
+                            'regime': proposal.get('regime'),
+                            'execution_type': 'paper_testnet',
+                            'order_id': binance_order.get('order_id'),
+                            'paired_with': mexc_trade_id
+                        }),
+                        execution_mode='paper'
+                    )
+                    db_session.add(binance_trade)
+                    await db_session.flush()
+                    binance_trade_id = binance_trade.id
+                
                 # Update pairing references
                 if binance_trade_id and mexc_trade_id:
-                    from sqlalchemy import select
-                    stmt = select(PaperTrades).where(PaperTrades.id == binance_trade_id)
+                    stmt = select(PaperTrades).where(PaperTrades.id == mexc_trade_id)
                     res = await db_session.execute(stmt)
-                    bt = res.scalar_one_or_none()
-                    if bt:
-                        bt_notes = json.loads(bt.notes) if bt.notes else {}
-                        bt_notes['paired_with'] = mexc_trade_id
-                        bt.notes = json.dumps(bt_notes)
+                    mt = res.scalar_one_or_none()
+                    if mt:
+                        mt_notes = json.loads(mt.notes) if mt.notes else {}
+                        mt_notes['paired_with'] = binance_trade_id
+                        mt.notes = json.dumps(mt_notes)
+                        await db_session.flush()
             
             # Send Telegram notification
             notifier = TelegramNotifier()
@@ -751,7 +876,7 @@ class LiveTradingService:
             }
             
         except Exception as e:
-            print(f"❌ Dual Gold trade failed: {e}")
+            logger.error(f"❌ Dual Gold trade failed: {e}")
             raise
         finally:
             await hybrid_manager.close()

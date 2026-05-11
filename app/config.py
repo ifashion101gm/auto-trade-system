@@ -2,12 +2,9 @@
 Centralized configuration management using Pydantic Settings.
 """
 import os
-from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
 from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Load .env file before initializing settings
-load_dotenv()
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
@@ -53,7 +50,7 @@ class Settings(BaseSettings):
     BYBIT_API_SECRET: Optional[str] = None
     
     # Active Exchange: binance, mexc, bybit
-    ACTIVE_EXCHANGE: str = "binance"
+    ACTIVE_EXCHANGE: str = "mexc"
     
     # Execution Mode: proposal, semi-auto, fully-auto
     EXECUTION_MODE: str = "semi-auto"
@@ -63,21 +60,40 @@ class Settings(BaseSettings):
     AUTO_EXECUTE_THRESHOLD_USD: float = 100.0
     
     # Gold Futures Trading Configuration
-    ACTIVE_EXCHANGE: str = "binance"
-    GOLD_SYMBOL_BINANCE: str = "PAXG/USDT"  # Paxos Gold on Binance Testnet
-    GOLD_SYMBOL_MEXC: str = "XAUT/USDT"     # Tether Gold on MEXC
+    GOLD_SYMBOL_BINANCE: str = "PAXG/USDT"  # Paxos Gold on Binance Testnet (legacy)
+    GOLD_SYMBOL_MEXC: str = "XAUT/USDT"     # Tether Gold on MEXC (primary)
     GOLD_MAX_LEVERAGE: int = 5
     GOLD_RISK_PER_TRADE: float = 0.01
     GOLD_MIN_CONFIDENCE: float = 0.65
+    
+    # Trading Profile Configuration
+    TRADING_PROFILE: str = "safer_growth"  # Options: safer_growth, aggressive
+    
+    # Safer Growth Mode (Conservative)
+    SAFER_GROWTH_RISK_PER_TRADE: float = 0.005  # 0.5%
+    SAFER_GROWTH_MAX_DAILY_DRAWDOWN: float = 0.02  # 2%
+    SAFER_GROWTH_MAX_POSITIONS: int = 2
+    SAFER_GROWTH_CONFIDENCE_THRESHOLD: float = 0.74
+    SAFER_GROWTH_LONDON_BREAKOUT_PRIORITY: bool = True
+    SAFER_GROWTH_ATR_STOPS: bool = True
+    SAFER_GROWTH_ADAPTIVE_SIZING: bool = True
+    
+    # Aggressive Mode
+    AGGRESSIVE_RISK_PER_TRADE: float = 0.01  # 1%
+    AGGRESSIVE_MAX_DAILY_DRAWDOWN: float = 0.04  # 4%
+    AGGRESSIVE_MAX_POSITIONS: int = 4
+    AGGRESSIVE_CONFIDENCE_THRESHOLD: float = 0.65
+    AGGRESSIVE_SCALING_ENTRIES: bool = True
     
     # General
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"
 
-    class Config:
-        env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env")
-        env_file_encoding = "utf-8"
-        extra = "ignore"
-        case_sensitive = True
+    model_config = SettingsConfigDict(
+        env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+        case_sensitive=True,
+    )
 
 settings = Settings()

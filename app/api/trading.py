@@ -241,6 +241,27 @@ async def execute_gold_dual_trade(
         print(f"   Strategy: {proposal.get('strategy_name')}")
         print(f"   Confidence: {proposal.get('confidence')*100:.1f}%")
         
+        # Additional validation at API level before dual execution
+        from app.infra.trade_validator import TradeValidator
+        validator = TradeValidator()
+        validation = await validator.validate_trade(
+            proposal=proposal,
+            user_id=user_id,
+            db_session=db_session,
+            exchange="mexc",
+            symbol=settings.GOLD_SYMBOL_MEXC
+        )
+        
+        # Send Telegram validation report
+        notifier = TelegramNotifier()
+        await notifier.send_trade_validation_report(validation, proposal)
+        
+        if not validation.approved:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Gold trade REJECTED: {'; '.join(validation.violations)}"
+            )
+        
         # Execute dual trade on both exchanges
         result = await service.execute_dual_gold_trade(
             proposal=proposal,
@@ -328,6 +349,24 @@ async def execute_paper_trade(
         Trade record dictionary
     """
     ts_open = datetime.utcnow().isoformat()
+    
+    # Validate trade against rules before creation
+    from app.infra.trade_validator import TradeValidator
+    validator = TradeValidator()
+    validation = await validator.validate_trade(
+        proposal=proposal,
+        user_id=user_id,
+        db_session=db_session,
+        exchange="binance",  # or "mexc" depending on context
+        symbol=proposal.get('symbol', 'BTC/USDT')
+    )
+    
+    # Send Telegram validation report
+    notifier = TelegramNotifier()
+    await notifier.send_trade_validation_report(validation, proposal)
+    
+    if not validation.approved:
+        raise ValueError(f"Trade REJECTED: {'; '.join(validation.violations)}")
     
     # Create paper trade record
     paper_trade = PaperTrades(

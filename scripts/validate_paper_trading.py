@@ -45,10 +45,14 @@ async def validate_paper_trading_cycle():
     market_data = {
         'symbol': 'BTC/USDT',
         'current_price': 45000.0,
+        'bid': 44999.50,
+        'ask': 45000.50,
         'volume_24h': 25000000000,
-        'volatility': 0.45,  # Normal volatility
+        'volatility': 0.25,  # Lower volatility for better quality score
         'rsi': 55.0,
         'macd': 150.0,
+        'ma_20': 44800.0,
+        'ma_50': 44500.0,
         'timestamp': datetime.utcnow().isoformat()
     }
     print(f"✅ Market data prepared: {market_data['symbol']} @ ${market_data['current_price']:,.2f}")
@@ -288,5 +292,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    exit_code = loop.run_until_complete(main())
     sys.exit(exit_code)

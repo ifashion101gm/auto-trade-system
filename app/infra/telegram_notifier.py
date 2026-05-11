@@ -108,14 +108,33 @@ class TelegramNotifier:
         # Calculate slippage
         slippage = abs(filled_price - entry_price) / entry_price * 100 if entry_price > 0 else 0
         slippage_emoji = "✅" if slippage < 0.1 else "⚠️" if slippage < 0.5 else "❌"
+        
+        # Enhanced fields for institutional-grade reporting
+        session = trade_data.get('session', 'N/A')
+        rr_ratio = trade_data.get('expected_reward_risk_ratio', 2.0)
+        quality_score = trade_data.get('quality_score', 'N/A')
+        ai_engine = trade_data.get('ai_engine', 'GPT-4o-mini')
+        raw_confidence = trade_data.get('raw_confidence', confidence)
+        position_value = qty * filled_price
+        
+        # Calculate R:R ratio display
+        if stop_loss and take_profit:
+            risk_distance = abs(entry_price - stop_loss)
+            reward_distance = abs(take_profit - entry_price)
+            actual_rr = reward_distance / risk_distance if risk_distance > 0 else 0
+            rr_display = f"{actual_rr:.1f}:1"
+        else:
+            rr_display = f"{rr_ratio:.1f}:1"
 
         message = f"""
 <b>{emoji} NEW TRADE EXECUTED ON {exchange.upper()}</b>
 
+<b>Trade #{trade_data.get('trade_id', 'N/A')}</b>
 <b>Symbol:</b> {symbol}
 <b>Side:</b> {side}
 <b>Strategy:</b> {strategy}
 <b>Regime:</b> {regime}
+<b>Session:</b> {session if session != 'N/A' else 'N/A'}
 
 <b>Order Details:</b>
 • Order ID: <code>{order_id}</code>
@@ -123,17 +142,25 @@ class TelegramNotifier:
 • Filled Price: ${filled_price:,.2f}
 • Slippage: {slippage_emoji} {slippage:.4f}%
 • Quantity: {qty}
+• Position Value: ${position_value:,.2f}
 • Leverage: {leverage}x
 • Fee: ${fee:.4f} {fee_currency}
 
 <b>Risk Management:</b>
 • Stop Loss: {sl_text}
 • Take Profit: {tp_text}
+• R:R Ratio: {rr_display}
 • Risk Level: {risk_level.upper()}
 
-<b>AI Confidence:</b> {confidence:.0%}
-<b>Trade ID:</b> #{trade_data.get('trade_id', 'N/A')}
-<b>Time:</b> {trade_data.get('timestamp', 'Now')}
+<b>AI Analysis:</b>
+• Engine: {ai_engine}
+• Raw Confidence: {raw_confidence:.0%}
+• Calibrated Confidence: {confidence:.0%}
+• Quality Score: {quality_score}/100
+
+<b>Metadata:</b>
+• Time: {trade_data.get('timestamp', 'Now')}
+• Exchange: {exchange}
         """.strip()
         
         return await self.send_message(message)
@@ -326,4 +353,102 @@ class TelegramNotifier:
 <i>Paper vs Live execution comparison for Gold futures</i>
         """.strip()
         
+        return await self.send_message(message)
+    
+    async def send_trade_validation_report(
+        self,
+        validation_result: Any,
+        proposal: Dict[str, Any]
+    ) -> bool:
+        """
+        Send detailed validation report for trade attempt.
+        
+        Args:
+            validation_result: ValidationResult object with validation data
+            proposal: Original trade proposal dictionary
+            
+        Returns:
+            True if sent successfully
+        """
+        symbol = validation_result.proposed_trade.get('symbol', 'UNKNOWN')
+        side = validation_result.proposed_trade.get('side', 'UNKNOWN').upper()
+        entry_price = validation_result.proposed_trade.get('entry_price', 0)
+        quantity = validation_result.proposed_trade.get('quantity', 0)
+        leverage = validation_result.proposed_trade.get('leverage', 1)
+        confidence = validation_result.proposed_trade.get('confidence', 0)
+        
+        # Determine approval status and emoji
+        if validation_result.approved:
+            emoji = "✅"
+            status_text = "APPROVED"
+        else:
+            emoji = "❌"
+            status_text = "REJECTED"
+        
+        # Build message based on approval status
+        if validation_result.approved:
+            # APPROVED trade message
+            message = f"""
+<b>{emoji} TRADE VALIDATION: {status_text}</b>
+
+<b>Trade Details:</b>
+• Symbol: {symbol}
+• Side: {side}
+• Entry Price: ${entry_price:,.2f}
+• Quantity: {quantity}
+• Leverage: {leverage}x
+• Position Value: ${validation_result.position_value:,.2f}
+
+<b>Validation Results:</b>
+• Confidence: {confidence:.0%} (threshold: {validation_result.confidence_threshold:.0%}) ✅
+• Risk Amount: ${validation_result.risk_amount:.2f} (limit: {validation_result.risk_threshold:.0%}) ✅
+• Open Positions: {validation_result.open_positions_count} ✅
+• Daily Drawdown: {validation_result.daily_drawdown_pct:.2f}% ✅
+"""
+            # Add warnings if any
+            if validation_result.warnings:
+                message += f"\n<b>Warnings:</b>\n"
+                for warning in validation_result.warnings:
+                    message += f"️  {warning}\n"
+            
+            # Add metadata
+            message += f"\n<b>Profile:</b> {settings.TRADING_PROFILE}\n"
+            message += f"<b>Execution Mode:</b> {settings.EXECUTION_MODE}"
+        
+        else:
+            # REJECTED trade message
+            message = f"""
+<b>{emoji} TRADE VALIDATION: {status_text}</b>
+
+<b>Trade Proposal:</b>
+• Symbol: {symbol}
+• Side: {side}
+• Entry Price: ${entry_price:,.2f}
+• Quantity: {quantity}
+• Leverage: {leverage}x
+• Confidence: {confidence:.0%}
+
+<b> VIOLATIONS ({len(validation_result.violations)}):</b>
+"""
+            # List all violations
+            for i, violation in enumerate(validation_result.violations, 1):
+                message += f"{i}. {violation}\n"
+            
+            # Add comparison details
+            message += f"\n<b>Required vs Proposed:</b>\n"
+            message += f"• Confidence: {confidence:.0%} ≥ {validation_result.confidence_threshold:.0%} required\n"
+            message += f"• Risk: ${validation_result.risk_amount:.2f} ≤ {validation_result.risk_threshold:.0%} of position required\n"
+            message += f"• Open Positions: {validation_result.open_positions_count} (max: {validation_result.open_positions_count})\n"
+            
+            # Add warnings if any
+            if validation_result.warnings:
+                message += f"\n<b>Additional Warnings:</b>\n"
+                for warning in validation_result.warnings:
+                    message += f"⚠️  {warning}\n"
+            
+            # Add metadata
+            message += f"\n<b>Profile:</b> {settings.TRADING_PROFILE}\n"
+            message += f"<b>Execution Mode:</b> {settings.EXECUTION_MODE}"
+        
+        message = message.strip()
         return await self.send_message(message)

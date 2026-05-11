@@ -3,8 +3,12 @@ Unified Exchange Manager supporting multiple exchanges (Binance, MEXC, Bybit).
 Provides consistent interface for order execution across different platforms.
 Controls testnet vs live trading via configuration flags.
 """
+import logging
 from typing import Dict, Any, Optional, List
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class UnifiedExchangeManager:
@@ -31,7 +35,7 @@ class UnifiedExchangeManager:
         
         # Initialize appropriate exchange client
         self.client = self._create_client()
-        print(f"✅ Exchange Manager initialized: {self.exchange_name.upper()} ({'TESTNET' if self.use_testnet else 'LIVE'})")
+        logger.info(f"✅ Exchange Manager initialized: {self.exchange_name.upper()} ({'TESTNET' if self.use_testnet else 'LIVE'})")
     
     def _create_client(self):
         """Create appropriate exchange client based on configuration."""

@@ -3,10 +3,14 @@ Database connection and configuration module.
 Supports both SQLite (with WAL mode) and PostgreSQL.
 """
 import os
+import logging
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 # Database URL from environment variable via centralized config
 DATABASE_URL = settings.DATABASE_URL
@@ -46,6 +50,7 @@ async def init_db():
     """Initialize database tables."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    logger.info("✅ Database initialized with WAL mode")
 
 
 async def get_session() -> AsyncSession:

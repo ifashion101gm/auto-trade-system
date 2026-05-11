@@ -2,6 +2,7 @@
 MEXC exchange client for spot and futures trading.
 Uses ccxt library for unified API access.
 """
+import logging
 import ccxt.async_support as ccxt
 from typing import Dict, Any, Optional, List
 import hashlib
@@ -9,6 +10,9 @@ import hmac
 import time
 import aiohttp
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class MEXCClient:
@@ -58,7 +62,7 @@ class MEXCClient:
             }
         })
         
-        print(f"✅ MEXC Client initialized ({self.market_type.upper()})")
+        logger.info(f"✅ MEXC Client initialized ({self.market_type.upper()})")
     
     async def close(self):
         """Close exchange connection."""
@@ -516,5 +520,5 @@ class MEXCClient:
             markets = await self.exchange.load_markets()
             return symbol in markets
         except Exception as e:
-            print(f"⚠️  Symbol validation failed: {e}")
+            logger.warning(f"⚠️  Symbol validation failed: {e}")
             return False

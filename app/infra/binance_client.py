@@ -2,9 +2,13 @@
 Binance Testnet/Mainnet client for live order execution.
 Uses ccxt library for unified exchange API access.
 """
+import logging
 import ccxt.async_support as ccxt
 from typing import Dict, Any, Optional, List
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class BinanceClient:
@@ -73,8 +77,8 @@ class BinanceClient:
                     'v2Public': f'{base_url}/fapi/v2',
                     'v2Private': f'{base_url}/fapi/v2',
                 }
-                print(f"✅ Binance Client initialized (FUTURES DEMO MODE)")
-                print(f"   Endpoint: {base_url}")
+                logger.info("✅ Binance Client initialized (FUTURES DEMO MODE)")
+                logger.info(f"   Endpoint: {base_url}")
                 
             elif self.demo_mode == 'spot_demo':
                 # Spot Demo Trading
@@ -82,25 +86,25 @@ class BinanceClient:
                 self.exchange = ccxt.binance(exchange_config)
                 # Enable sandbox mode for spot demo
                 self.exchange.set_sandbox_mode(True)
-                print(f"✅ Binance Client initialized (SPOT DEMO MODE)")
-                print(f"   Note: Ensure your account has Demo Trading enabled")
+                logger.info("✅ Binance Client initialized (SPOT DEMO MODE)")
+                logger.info("   Note: Ensure your account has Demo Trading enabled")
                 
             else:  # testnet (legacy)
                 exchange_config['options']['defaultType'] = 'spot'
                 self.exchange = ccxt.binance(exchange_config)
-                print(f"✅ Binance Client initialized (TESTNET - SPOT)")
+                logger.info("✅ Binance Client initialized (TESTNET - SPOT)")
         else:
             exchange_config['options']['defaultType'] = 'spot'
             self.exchange = ccxt.binance(exchange_config)
-            print(f"⚠️  Binance Client initialized (MAINNET - LIVE TRADING!)")
+            logger.warning("⚠️  Binance Client initialized (MAINNET - LIVE TRADING!)")
         
         # Enable sandbox mode for spot demo/testnet
         if self.testnet and self.demo_mode in ['spot_demo', 'testnet']:
             try:
                 self.exchange.set_sandbox_mode(True)
-                print(f"   Sandbox mode: Enabled")
+                logger.info("   Sandbox mode: Enabled")
             except Exception as e:
-                print(f"   ⚠️  Sandbox mode warning: {e}")
+                logger.warning(f"   ⚠️  Sandbox mode warning: {e}")
     
     async def close(self):
         """Close exchange connection."""
@@ -300,9 +304,9 @@ class BinanceClient:
                     async with session.post(url, headers=headers) as resp:
                         if resp.status != 200:
                             error_text = await resp.text()
-                            print(f"⚠️  Warning: Failed to set leverage: {resp.status} - {error_text}")
+                            logger.warning(f"⚠️  Warning: Failed to set leverage: {resp.status} - {error_text}")
                         else:
-                            print(f"✅ Leverage set to {leverage}x for {symbol_clean}")
+                            logger.info(f"✅ Leverage set to {leverage}x for {symbol_clean}")
                 
                 # Step 2: Place market order
                 timestamp = int(time.time() * 1000)
@@ -682,5 +686,5 @@ class BinanceClient:
             markets = await self.exchange.load_markets()
             return symbol in markets
         except Exception as e:
-            print(f"⚠️  Symbol validation failed: {e}")
+            logger.warning(f"⚠️  Symbol validation failed: {e}")
             return False

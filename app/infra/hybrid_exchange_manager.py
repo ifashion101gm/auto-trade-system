@@ -1,10 +1,15 @@
 """
 Hybrid Exchange Manager for simultaneous multi-exchange trading.
-Supports paper trading on Binance Testnet and live trading on MEXC Futures.
+Supports demo trading on MEXC Futures and paper trading on Binance Testnet.
 Enables dual execution for Gold futures comparison and validation.
+Primary exchange is now MEXC Demo Futures for XAUT/USDT.
 """
+import logging
 from typing import Dict, Any, Optional, List, Tuple
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class HybridExchangeManager:
@@ -12,8 +17,8 @@ class HybridExchangeManager:
     Manages simultaneous connections to multiple exchanges for hybrid trading.
     
     Features:
-    - Parallel connections to Binance Testnet (paper) and MEXC (live)
-    - Symbol-aware routing (PAXG/USDT for Binance, XAU/USDT for MEXC)
+    - Parallel connections to MEXC Demo Futures (primary) and Binance Testnet (comparison)
+    - Symbol-aware routing (XAUT/USDT for MEXC, PAXG/USDT for Binance)
     - Dual trade execution with result comparison
     - Independent balance and position tracking per exchange
     """
@@ -24,13 +29,26 @@ class HybridExchangeManager:
         self.mexc_client = None
         self._initialize_clients()
         
-        print(f"✅ Hybrid Exchange Manager initialized")
-        print(f"   Binance (Paper): {settings.GOLD_SYMBOL_BINANCE}")
-        print(f"   MEXC (Live): {settings.GOLD_SYMBOL_MEXC}")
+        logger.info("✅ Hybrid Exchange Manager initialized")
+        logger.info(f"   MEXC (Primary/Demo): {settings.GOLD_SYMBOL_MEXC}")
+        logger.info(f"   Binance (Comparison/Paper): {settings.GOLD_SYMBOL_BINANCE}")
     
     def _initialize_clients(self):
         """Create exchange client instances."""
-        # Initialize Binance Testnet client for paper trading
+        # Initialize MEXC Demo Futures client for primary trading
+        try:
+            from app.infra.mexc_client import MEXCClient
+            self.mexc_client = MEXCClient(
+                api_key=settings.MEXC_API_KEY,
+                api_secret=settings.MEXC_API_SECRET,
+                market_type='futures'
+            )
+            logger.info("   ✅ MEXC Demo Futures client ready")
+        except Exception as e:
+            logger.warning(f"   ⚠️  MEXC client initialization failed: {e}")
+            self.mexc_client = None
+        
+        # Initialize Binance Testnet client for comparison/paper trading
         try:
             from app.infra.binance_client import BinanceClient
             self.binance_client = BinanceClient(
@@ -39,23 +57,10 @@ class HybridExchangeManager:
                 testnet=True,
                 demo_mode='futures_demo'
             )
-            print(f"   ✅ Binance Testnet client ready")
+            logger.info("   ✅ Binance Testnet client ready")
         except Exception as e:
-            print(f"   ⚠️  Binance client initialization failed: {e}")
+            logger.warning(f"   ⚠️  Binance client initialization failed: {e}")
             self.binance_client = None
-        
-        # Initialize MEXC live client for real trading
-        try:
-            from app.infra.mexc_client import MEXCClient
-            self.mexc_client = MEXCClient(
-                api_key=settings.MEXC_API_KEY,
-                api_secret=settings.MEXC_API_SECRET,
-                market_type='futures'
-            )
-            print(f"   ✅ MEXC Live client ready")
-        except Exception as e:
-            print(f"   ⚠️  MEXC client initialization failed: {e}")
-            self.mexc_client = None
     
     async def close(self):
         """Close all exchange connections."""
@@ -124,10 +129,13 @@ class HybridExchangeManager:
         """
         Execute trade on BOTH exchanges simultaneously.
         
+        Primary execution is on MEXC Demo Futures (XAUT/USDT).
+        Secondary execution is on Binance Testnet (PAXG/USDT) for comparison.
+        
         Args:
             side: 'buy' or 'sell'
             amount_binance: Quantity for Binance (PAXG)
-            amount_mexc: Quantity for MEXC (XAU)
+            amount_mexc: Quantity for MEXC (XAUT) - PRIMARY
             leverage: Leverage multiplier
             
         Returns:
@@ -139,28 +147,7 @@ class HybridExchangeManager:
             'status': 'partial'
         }
         
-        # Execute on Binance Testnet (paper trade)
-        if self.binance_client:
-            try:
-                binance_result = await self.binance_client.create_market_order(
-                    symbol=settings.GOLD_SYMBOL_BINANCE,
-                    side=side,
-                    amount=amount_binance,
-                    leverage=leverage
-                )
-                results['binance'] = {
-                    'status': 'success',
-                    'order': binance_result,
-                    'type': 'paper'
-                }
-            except Exception as e:
-                results['binance'] = {
-                    'status': 'failed',
-                    'error': str(e),
-                    'type': 'paper'
-                }
-        
-        # Execute on MEXC Live (real trade)
+        # Execute on MEXC Demo Futures (primary)
         if self.mexc_client:
             try:
                 mexc_result = await self.mexc_client.create_market_order(
@@ -172,13 +159,34 @@ class HybridExchangeManager:
                 results['mexc'] = {
                     'status': 'success',
                     'order': mexc_result,
-                    'type': 'live'
+                    'type': 'demo_futures'
                 }
             except Exception as e:
                 results['mexc'] = {
                     'status': 'failed',
                     'error': str(e),
-                    'type': 'live'
+                    'type': 'demo_futures'
+                }
+        
+        # Execute on Binance Testnet (comparison/paper)
+        if self.binance_client:
+            try:
+                binance_result = await self.binance_client.create_market_order(
+                    symbol=settings.GOLD_SYMBOL_BINANCE,
+                    side=side,
+                    amount=amount_binance,
+                    leverage=leverage
+                )
+                results['binance'] = {
+                    'status': 'success',
+                    'order': binance_result,
+                    'type': 'paper_testnet'
+                }
+            except Exception as e:
+                results['binance'] = {
+                    'status': 'failed',
+                    'error': str(e),
+                    'type': 'paper_testnet'
                 }
         
         # Determine overall status
@@ -202,7 +210,7 @@ class HybridExchangeManager:
         Execute trade on a single exchange.
         
         Args:
-            exchange: 'binance' or 'mexc'
+            exchange: 'mexc' (primary) or 'binance' (comparison)
             side: 'buy' or 'sell'
             amount: Quantity to trade
             leverage: Leverage multiplier
@@ -210,24 +218,7 @@ class HybridExchangeManager:
         Returns:
             Execution result
         """
-        if exchange.lower() == 'binance':
-            if not self.binance_client:
-                raise ValueError("Binance client not available")
-            
-            order = await self.binance_client.create_market_order(
-                symbol=settings.GOLD_SYMBOL_BINANCE,
-                side=side,
-                amount=amount,
-                leverage=leverage
-            )
-            return {
-                'exchange': 'binance',
-                'symbol': settings.GOLD_SYMBOL_BINANCE,
-                'order': order,
-                'type': 'paper'
-            }
-        
-        elif exchange.lower() == 'mexc':
+        if exchange.lower() == 'mexc':
             if not self.mexc_client:
                 raise ValueError("MEXC client not available")
             
@@ -241,7 +232,24 @@ class HybridExchangeManager:
                 'exchange': 'mexc',
                 'symbol': settings.GOLD_SYMBOL_MEXC,
                 'order': order,
-                'type': 'live'
+                'type': 'demo_futures'
+            }
+        
+        elif exchange.lower() == 'binance':
+            if not self.binance_client:
+                raise ValueError("Binance client not available")
+            
+            order = await self.binance_client.create_market_order(
+                symbol=settings.GOLD_SYMBOL_BINANCE,
+                side=side,
+                amount=amount,
+                leverage=leverage
+            )
+            return {
+                'exchange': 'binance',
+                'symbol': settings.GOLD_SYMBOL_BINANCE,
+                'order': order,
+                'type': 'paper_testnet'
             }
         
         else:
