@@ -153,7 +153,17 @@ async def validate_system():
             print(f"    - Stop Loss: ${result['trade_proposal']['stop_loss']}")
             print(f"    - Take Profit: ${result['trade_proposal']['take_profit']}")
             print(f"    - Leverage: {result['trade_proposal']['leverage']}x")
+        elif result['status'] == 'rejected':
+            # Quality filter rejection - this is NORMAL behavior, not an error
+            reason = result.get('rejection_reason', 'Unknown')
+            quality_score = result.get('quality_score', 0)
+            
+            print(f"⚠️  AI cycle rejected by quality filter in {elapsed:.2f}s")
+            print(f"\nQuality Score: {quality_score}/100")
+            print(f"Rejection Reason: {reason}")
+            print(f"\n💡 This is normal - the system is protecting capital from low-quality trades.")
         else:
+            # Actual failure - unexpected error
             print(f"❌ AI cycle failed: {result.get('error')}")
         
         print()
@@ -233,7 +243,17 @@ async def validate_system():
                     print("✅ Database persistence verified")
                 else:
                     print("⚠️  Some records missing")
+            elif result['status'] == 'rejected':
+                # Quality filter rejection - this is NORMAL behavior, not an error
+                reason = result.get('rejection_reason', 'Unknown')
+                quality_score = result.get('quality_score', 0)
+                
+                print(f"⚠️  Trade proposal rejected by quality filter")
+                print(f"  • Quality Score: {quality_score}/100")
+                print(f"  • Reason: {reason}")
+                print(f"\n💡 This is normal - the system is protecting capital from low-quality trades.")
             else:
+                # Actual failure - unexpected error
                 print(f"❌ Failed to generate trade proposal: {result.get('error')}")
         
         print()

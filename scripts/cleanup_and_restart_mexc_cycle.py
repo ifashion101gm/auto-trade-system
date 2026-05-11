@@ -289,8 +289,29 @@ class MexcCycleManager:
                 }
                 
                 return new_trade_info
+            
+            elif result['status'] == 'rejected':
+                # Quality filter rejection - this is NORMAL behavior, not an error
+                reason = result.get('rejection_reason', 'Unknown')
+                quality_score = result.get('quality_score', 0)
+                
+                logger.info("⚠️  Trade rejected by quality filter")
+                logger.info(f"   Quality Score: {quality_score}/100")
+                logger.info(f"   Reason: {reason}")
+                logger.info(f"   This is normal - system protecting capital from low-quality trades")
+                
+                new_trade_info = {
+                    'status': 'rejected',
+                    'cycle_time_ms': result.get('cycle_time_ms', 0),
+                    'rejection_reason': reason,
+                    'quality_score': quality_score
+                }
+                
+                return new_trade_info
+            
             else:
-                logger.error(f"❌ Validation cycle failed: {result.get('error')}")
+                # Actual failure - unexpected error
+                logger.error(f" Validation cycle failed: {result.get('error')}")
                 return {
                     'status': 'failed',
                     'error': result.get('error')
@@ -307,18 +328,52 @@ class MexcCycleManager:
     async def step5_send_new_trade_report(self, new_trade_info: Dict[str, Any]):
         """
         Step 5: Send Telegram report for the new trade.
-        
+            
         Args:
             new_trade_info: Details of the new trade
         """
         logger.info("\n" + "="*80)
         logger.info("STEP 5: Sending New Trade Report via Telegram")
         logger.info("="*80)
-        
-        if new_trade_info.get('status') != 'success':
+            
+        # Handle quality filter rejection
+        if new_trade_info.get('status') == 'rejected':
+            reason = new_trade_info.get('rejection_reason', 'Unknown')
+            quality_score = new_trade_info.get('quality_score', 0)
+            cycle_time = new_trade_info.get('cycle_time_ms', 0)
+                
+            # Determine severity and emoji based on score
+            if quality_score >= 80:
+                emoji = "⚠️"
+                severity = "MARGINAL"
+            elif quality_score >= 60:
+                emoji = ""
+                severity = "LOW QUALITY"
+            else:
+                emoji = "🔴"
+                severity = "POOR QUALITY"
+                
+            message = (
+                f"{emoji} <b>Trade Proposal REJECTED by Quality Filter</b>\n\n"
+                f"<b>Symbol:</b> {settings.GOLD_SYMBOL_MEXC}\n"
+                f"<b>Severity:</b> {severity}\n"
+                f"<b>Quality Score:</b> {quality_score}/100\n\n"
+                f"<b>Rejection Reason:</b>\n"
+                f"{reason}\n\n"
+                f"<b>Cycle Time:</b> {cycle_time:.0f}ms\n"
+                f"<b>Timestamp:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
+                f"<i>This trade did not meet minimum quality standards and was blocked before validation.</i>"
+            )
+                
+            await self.notifier.send_message(message)
+            logger.info("✅ Sent quality filter rejection report to Telegram")
+            return
+            
+        # Handle actual failures
+        if new_trade_info.get('status') == 'failed':
             error_msg = new_trade_info.get('error', 'Unknown error')
             message = (
-                f"🚨 <b>Validation Cycle Failed</b>\n\n"
+                f" <b>Validation Cycle Failed</b>\n\n"
                 f"<b>Error:</b> {error_msg}\n\n"
                 f"<i>{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
             )

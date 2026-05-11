@@ -245,7 +245,40 @@ async def validate_complete_cycle():
                 
                 return True
                 
+            elif result['status'] == 'rejected':
+                # Quality filter rejection - this is NORMAL behavior, not an error
+                reason = result.get('rejection_reason', 'Unknown')
+                quality_score = result.get('quality_score', 0)
+                cycle_time = result.get('cycle_time_ms', 0)
+                
+                print("⚠️  TRADE REJECTED by Quality Filter")
+                print()
+                print(f"Quality Score: {quality_score}/100")
+                print(f"Cycle Time: {cycle_time:.0f}ms")
+                print()
+                print(f"Rejection Reason:")
+                print(f"  {reason}")
+                print()
+                print("💡 This is normal - the system is protecting capital from low-quality trades.")
+                print("   The trade did not meet minimum quality standards and was blocked before validation.")
+                print()
+                print("=" * 80)
+                print("VALIDATION SUMMARY")
+                print("=" * 80)
+                print()
+                print("✅ Market Data Fetch: Real-time data from Binance")
+                print("✅ AI Analysis: OpenRouter-powered decision making")
+                print("✅ Quality Filter: Trade rejected (normal risk management)")
+                print()
+                print("🎯 SYSTEM STATUS: QUALITY FILTER WORKING CORRECTLY")
+                print()
+                print("The system correctly identified a low-quality trade opportunity and protected capital.")
+                print()
+                
+                return True  # Rejection is not an error
+                
             else:
+                # Actual failure - unexpected error
                 print(f"❌ CYCLE FAILED")
                 print()
                 print(f"Error: {result.get('error', 'Unknown error')}")

@@ -95,30 +95,39 @@ class MEXCClient:
             raise Exception(f"Failed to fetch balance: {str(e)}")
     
     async def _fetch_balance_direct(self) -> Dict[str, Any]:
-        """Fetch balance directly from MEXC Futures API v1"""
+        """Fetch balance directly from MEXC Futures API v1
+        
+        According to official MEXC API documentation:
+        - POST requests: signature = HMAC_SHA256(secret, accessKey + timestamp + JSON_body)
+        - Signature goes in header, NOT in request body
+        - Headers: ApiKey, Request-Time, Signature, Content-Type: application/json
+        """
         import json
         
-        timestamp = int(time.time() * 1000)
+        timestamp = str(int(time.time() * 1000))
         
-        # Build request body (without sign first)
+        # Build request body WITHOUT signature (signature goes in header)
         body_dict = {
             'api_key': self.api_key,
             'req_time': timestamp
         }
         
-        # Create signature from the request body (before adding sign)
+        # Create JSON string for signing (sorted keys for consistency)
         json_body_for_sign = json.dumps(body_dict, sort_keys=True, separators=(',', ':'))
+        
+        # Signature: HMAC_SHA256(secret, accessKey + timestamp + jsonBody)
+        signature_string = f"{self.api_key}{timestamp}{json_body_for_sign}"
         signature = hmac.new(
             self.api_secret.encode('utf-8'),
-            json_body_for_sign.encode('utf-8'),
+            signature_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         
-        # Add signature to body
-        body_dict['sign'] = signature
-        
+        # Headers according to official docs
         headers = {
-            'X-MEXC-APIKEY': self.api_key,
+            'ApiKey': self.api_key,
+            'Request-Time': timestamp,
+            'Signature': signature,
             'Content-Type': 'application/json'
         }
         
@@ -126,7 +135,7 @@ class MEXCClient:
             async with session.post(
                 'https://contract.mexc.com/api/v1/private/account/assets',
                 headers=headers,
-                json=body_dict,
+                json=body_dict,  # Send body without 'sign' field
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as resp:
                 data = await resp.json()
@@ -212,28 +221,55 @@ class MEXCClient:
         
         return symbol
     
-    def _sign_mexc_request(self, params: Dict[str, Any]) -> str:
+    def _sign_mexc_request(
+        self,
+        api_key: str,
+        api_secret: str,
+        timestamp: str,
+        params: Optional[Dict[str, Any]] = None
+    ) -> str:
         """
-        Sign MEXC API request using HMAC SHA256.
-        For POST requests with JSON body, sign the JSON string.
-        For GET requests with query params, sign the query string.
+        Sign MEXC API request using HMAC SHA256 according to official documentation.
+        
+        Signature formula: HMAC_SHA256(secret, accessKey + timestamp + paramString)
+        
+        For POST requests:
+        - paramString = JSON string of request body (sorted keys)
+        
+        For GET/DELETE requests:
+        - paramString = URL-encoded query parameters (dictionary order, & separated)
         
         Args:
-            params: Dictionary of request parameters (excluding 'sign')
+            api_key: MEXC API key
+            api_secret: MEXC API secret
+            timestamp: Request timestamp in milliseconds (string)
+            params: Request parameters (optional, None for no params)
             
         Returns:
-            HMAC SHA256 signature
+            HMAC SHA256 signature (hex string, NOT base64 encoded)
+            
+        Example:
+            >>> timestamp = str(int(time.time() * 1000))
+            >>> params = {'api_key': 'YOUR_KEY', 'req_time': timestamp}
+            >>> signature = client._sign_mexc_request(api_key, api_secret, timestamp, params)
         """
         import json
         
-        # For MEXC Futures API v1, sign the JSON body for POST requests
-        # Sort keys to ensure consistent ordering
-        json_body = json.dumps(params, sort_keys=True, separators=(',', ':'))
+        # Build parameter string based on request type
+        if params is None or len(params) == 0:
+            param_string = ""
+        else:
+            # For POST: JSON string with sorted keys
+            # For GET: would use URL encoding (not implemented here as we use CCXT)
+            param_string = json.dumps(params, sort_keys=True, separators=(',', ':'))
         
-        # Create signature from JSON body
+        # Signature string: accessKey + timestamp + paramString
+        signature_string = f"{api_key}{timestamp}{param_string}"
+        
+        # Generate HMAC SHA256 signature
         signature = hmac.new(
-            self.api_secret.encode('utf-8'),
-            json_body.encode('utf-8'),
+            api_secret.encode('utf-8'),
+            signature_string.encode('utf-8'),
             hashlib.sha256
         ).hexdigest()
         

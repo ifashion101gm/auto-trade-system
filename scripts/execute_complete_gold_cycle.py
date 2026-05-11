@@ -140,7 +140,24 @@ async def execute_complete_gold_cycle():
             
             return True
             
+        elif result['status'] == 'rejected':
+            # Quality filter rejection - this is NORMAL behavior, not an error
+            reason = result.get('rejection_reason', 'Unknown')
+            quality_score = result.get('quality_score', 0)
+            cycle_time = result.get('cycle_time_ms', 0)
+            
+            print(f"\n⚠️  Status: REJECTED by Quality Filter")
+            print(f"⏱️  Cycle Time: {cycle_time:.0f}ms")
+            print(f"📊 Quality Score: {quality_score}/100")
+            print(f"\n🔍 Rejection Reason:")
+            print(f"   {reason}")
+            print(f"\n💡 This is normal - the system is protecting capital from low-quality trades.")
+            print(f"   The trade did not meet minimum quality standards and was blocked before validation.")
+            
+            return True  # Rejection is not an error
+            
         else:
+            # Actual failure - unexpected error
             print(f"\n❌ Status: FAILED")
             print(f"⏱️  Cycle Time: {result.get('cycle_time_ms', 0):.0f}ms")
             print(f"Error: {result.get('error', 'Unknown error')}")
