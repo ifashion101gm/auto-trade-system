@@ -280,13 +280,55 @@ class MexcPositionCloser:
         logger.info("STEP 4: Sending New Trade Report")
         logger.info("="*80)
         
-        if new_trade.get('status') != 'success':
+        # Handle rejected status (quality filter) - this is NOT an error
+        if new_trade.get('status') == 'rejected':
+            reason = new_trade.get('reason', 'Unknown')
+            quality_score = new_trade.get('quality_score', 0)
+            cycle_time_ms = new_trade.get('cycle_time_ms', 0)
+            
+            # Determine severity emoji
+            if quality_score >= 80:
+                emoji = "⚠️"
+                severity = "MARGINAL"
+            elif quality_score >= 60:
+                emoji = "🟡"
+                severity = "LOW QUALITY"
+            else:
+                emoji = "🔴"
+                severity = "POOR QUALITY"
+            
+            message = (
+                f"{emoji} <b>Trade Rejected by Quality Filter</b>\n\n"
+                f"<b>Symbol:</b> {settings.GOLD_SYMBOL_MEXC}\n"
+                f"<b>Severity:</b> {severity}\n"
+                f"<b>Quality Score:</b> {quality_score}/100\n\n"
+                f"<b>Rejection Reason:</b>\n"
+                f"{reason}\n\n"
+                f"<b>Cycle Time:</b> {cycle_time_ms:.0f}ms\n"
+                f"<i>{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</i>\n\n"
+                f"<i>This trade did not meet minimum quality standards and was blocked before validation.</i>"
+            )
+            
+            success = await self.notifier.send_message(message)
+            if success:
+                logger.info("✅ Quality rejection report sent to Telegram")
+            else:
+                logger.warning("⚠️  Failed to send rejection report")
+            return
+        
+        # Handle failed status (actual error)
+        if new_trade.get('status') == 'failed':
             message = (
                 f"🚨 <b>New Validation Cycle Failed</b>\n\n"
-                f"<b>Error:</b> {new_trade.get('error')}\n\n"
+                f"<b>Error:</b> {new_trade.get('error', 'Unknown error')}\n\n"
                 f"<i>{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</i>"
             )
             await self.notifier.send_message(message)
+            return
+        
+        # Handle successful trade execution
+        if new_trade.get('status') != 'success':
+            logger.warning(f"⚠️  Unknown status: {new_trade.get('status')}")
             return
         
         execution_status = new_trade.get('execution_status', 'unknown')
