@@ -13,7 +13,7 @@ sys.path.insert(0, '/home/admin/.openclaw/workspace/auto-trade-system')
 from app.config import settings
 from app.ai.orchestrator import AIAgentOrchestrator
 from app.infra.exchange_manager import UnifiedExchangeManager
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 from app.storage.db import async_session_maker, init_db
 from app.storage.models import PaperTrades, DecisionJournal, StrategyEvaluations
 

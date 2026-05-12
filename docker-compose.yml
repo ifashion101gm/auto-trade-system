@@ -74,6 +74,33 @@ services:
     networks:
       - trading-network
 
+  loki:
+    image: grafana/loki:latest
+    container_name: trading-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    restart: unless-stopped
+    networks:
+      - trading-network
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: trading-promtail
+    volumes:
+      - ./monitoring/promtail-config.yml:/etc/promtail/config.yml
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    restart: unless-stopped
+    networks:
+      - trading-network
+
 volumes:
   pgdata:
     driver: local
@@ -82,6 +109,8 @@ volumes:
   prometheus-data:
     driver: local
   grafana-data:
+    driver: local
+  loki-data:
     driver: local
 
 networks:

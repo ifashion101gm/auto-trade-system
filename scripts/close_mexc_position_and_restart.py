@@ -26,7 +26,7 @@ from sqlalchemy import select
 from app.config import settings
 from app.storage.models import PaperTrades
 from app.storage.db import async_session_maker
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 from app.infra.mexc_client import MEXCClient
 from app.services.live_trading_service import LiveTradingService
 from app.logging_config import get_logger

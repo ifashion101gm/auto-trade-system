@@ -28,7 +28,7 @@ from sqlalchemy import select, func
 from app.config import settings
 from app.storage.models import PaperTrades
 from app.storage.db import async_session_maker
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 from app.infra.exchange_manager import UnifiedExchangeManager
 from app.services.live_trading_service import LiveTradingService
 from app.logging_config import get_logger
@@ -341,32 +341,19 @@ class MexcCycleManager:
             reason = new_trade_info.get('rejection_reason', 'Unknown')
             quality_score = new_trade_info.get('quality_score', 0)
             cycle_time = new_trade_info.get('cycle_time_ms', 0)
-                
-            # Determine severity and emoji based on score
-            if quality_score >= 80:
-                emoji = "⚠️"
-                severity = "MARGINAL"
-            elif quality_score >= 60:
-                emoji = ""
-                severity = "LOW QUALITY"
-            else:
-                emoji = "🔴"
-                severity = "POOR QUALITY"
-                
-            message = (
-                f"{emoji} <b>Trade Proposal REJECTED by Quality Filter</b>\n\n"
-                f"<b>Symbol:</b> {settings.GOLD_SYMBOL_MEXC}\n"
-                f"<b>Severity:</b> {severity}\n"
-                f"<b>Quality Score:</b> {quality_score}/100\n\n"
-                f"<b>Rejection Reason:</b>\n"
-                f"{reason}\n\n"
-                f"<b>Cycle Time:</b> {cycle_time:.0f}ms\n"
-                f"<b>Timestamp:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
-                f"<i>This trade did not meet minimum quality standards and was blocked before validation.</i>"
+            
+            # Use the deduplication-aware method
+            sent = await self.notifier.send_trade_rejection_report(
+                symbol=settings.GOLD_SYMBOL_MEXC,
+                reason=reason,
+                quality_score=quality_score,
+                cycle_time_ms=cycle_time
             )
-                
-            await self.notifier.send_message(message)
-            logger.info("✅ Sent quality filter rejection report to Telegram")
+            
+            if sent:
+                logger.info("✅ Sent quality filter rejection report to Telegram")
+            else:
+                logger.info("⚠️  Rejection report suppressed (deduplication cooldown)")
             return
             
         # Handle actual failures

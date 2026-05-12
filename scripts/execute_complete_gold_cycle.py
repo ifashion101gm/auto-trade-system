@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from app.config import settings
 from app.services.live_trading_service import LiveTradingService
 from app.storage.db import get_session
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 
 
 async def execute_complete_gold_cycle():

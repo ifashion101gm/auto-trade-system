@@ -17,6 +17,7 @@ class TelegramNotifier:
     - System status updates
     - Error alerts
     - Formatted messages with emojis for readability
+    - Deduplication for rejection reports
     """
     
     def __init__(self, bot_token: Optional[str] = None, chat_id: Optional[str] = None):
@@ -31,6 +32,11 @@ class TelegramNotifier:
         self.chat_id = chat_id or settings.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.enabled = bool(self.bot_token and self.chat_id)
+        
+        # Deduplication tracking for rejection reports
+        # Key: (symbol, reason_category, score_range), Value: timestamp of last sent message
+        self._rejection_cooldowns: Dict[tuple, datetime] = {}
+        self._rejection_cooldown_seconds = 600  # 10 minutes default cooldown
         
         if not self.enabled:
             print("⚠️  Telegram notifications disabled (missing BOT_TOKEN or CHAT_ID)")
@@ -637,6 +643,10 @@ class TelegramNotifier:
         """
         Send trade rejection report when AI quality filter blocks a trade.
         
+        Implements deduplication to prevent spamming identical notifications.
+        Reports with same symbol, similar score range, and same reason category
+        are suppressed within the cooldown period (default 10 minutes).
+        
         Args:
             symbol: Trading pair symbol
             reason: Rejection reason from quality filter
@@ -644,8 +654,12 @@ class TelegramNotifier:
             cycle_time_ms: Cycle execution time in milliseconds
             
         Returns:
-            True if sent successfully
+            True if sent successfully, False if suppressed by deduplication
         """
+        # Check deduplication before sending
+        if not self._should_send_rejection(symbol, reason, quality_score):
+            return False
+        
         # Determine emoji based on score
         if quality_score >= 80:
             emoji = "⚠️"
@@ -673,7 +687,124 @@ class TelegramNotifier:
 <i>This trade did not meet minimum quality standards and was blocked before validation.</i>
         """.strip()
         
-        return await self.send_message(message)
+        result = await self.send_message(message)
+        
+        # Record this rejection for deduplication tracking
+        if result:
+            self._record_rejection(symbol, reason, quality_score)
+        
+        return result
+    
+    def _get_reason_category(self, reason: str) -> str:
+        """
+        Extract a normalized category from the rejection reason.
+        This allows grouping similar reasons while distinguishing different issues.
+        
+        Args:
+            reason: Full rejection reason text
+            
+        Returns:
+            Normalized reason category
+        """
+        reason_lower = reason.lower()
+        
+        # Categorize common rejection reasons
+        if 'quality score below threshold' in reason_lower or 'quality score' in reason_lower:
+            return 'quality_threshold'
+        elif 'confidence' in reason_lower:
+            return 'confidence_low'
+        elif 'risk' in reason_lower:
+            return 'risk_exceeded'
+        elif 'volatility' in reason_lower:
+            return 'volatility_high'
+        elif 'liquidity' in reason_lower:
+            return 'liquidity_insufficient'
+        elif 'spread' in reason_lower:
+            return 'spread_too_wide'
+        else:
+            # Return first few words as category for unknown reasons
+            words = reason_lower.split()[:3]
+            return '_'.join(words) if words else 'unknown'
+    
+    def _get_score_range(self, quality_score: int) -> str:
+        """
+        Group quality scores into ranges to avoid near-duplicate notifications.
+        
+        Args:
+            quality_score: Quality score (0-100)
+            
+        Returns:
+            Score range string (e.g., '70-79', '80-89')
+        """
+        # Group by tens to allow some variation but catch exact duplicates
+        range_start = (quality_score // 10) * 10
+        range_end = range_start + 9
+        return f"{range_start}-{range_end}"
+    
+    def _should_send_rejection(self, symbol: str, reason: str, quality_score: int) -> bool:
+        """
+        Check if a rejection report should be sent based on deduplication rules.
+        
+        Args:
+            symbol: Trading pair symbol
+            reason: Rejection reason
+            quality_score: Quality score
+            
+        Returns:
+            True if should send, False if suppressed by cooldown
+        """
+        now = datetime.utcnow()
+        reason_category = self._get_reason_category(reason)
+        score_range = self._get_score_range(quality_score)
+        
+        # Create deduplication key
+        dedup_key = (symbol, reason_category, score_range)
+        
+        # Check if we have a recent rejection with same characteristics
+        if dedup_key in self._rejection_cooldowns:
+            last_sent = self._rejection_cooldowns[dedup_key]
+            elapsed = (now - last_sent).total_seconds()
+            
+            if elapsed < self._rejection_cooldown_seconds:
+                remaining = self._rejection_cooldown_seconds - elapsed
+                print(f"⚠️  Rejection report suppressed (cooldown): {symbol} - {reason_category} "
+                      f"(score: {score_range}, {remaining:.0f}s remaining)")
+                return False
+        
+        return True
+    
+    def _record_rejection(self, symbol: str, reason: str, quality_score: int):
+        """
+        Record a rejection report for deduplication tracking.
+        
+        Args:
+            symbol: Trading pair symbol
+            reason: Rejection reason
+            quality_score: Quality score
+        """
+        now = datetime.utcnow()
+        reason_category = self._get_reason_category(reason)
+        score_range = self._get_score_range(quality_score)
+        
+        dedup_key = (symbol, reason_category, score_range)
+        self._rejection_cooldowns[dedup_key] = now
+        
+        # Clean up old entries to prevent memory leaks
+        self._cleanup_old_cooldowns(now)
+    
+    def _cleanup_old_cooldowns(self, now: datetime):
+        """
+        Remove expired cooldown entries to prevent memory leaks.
+        
+        Args:
+            now: Current timestamp
+        """
+        expired_keys = [
+            key for key, timestamp in self._rejection_cooldowns.items()
+            if (now - timestamp).total_seconds() > self._rejection_cooldown_seconds * 2
+        ]
+        for key in expired_keys:
+            del self._rejection_cooldowns[key]
 
     async def send_risk_alert(self, alert_type: str, details: Dict[str, Any]) -> bool:
         """

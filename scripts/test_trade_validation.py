@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.infra.trade_validator import TradeValidator, ValidationResult
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 from app.storage.db import async_session_maker
 from app.storage.models import PaperTrades
 from sqlalchemy import select

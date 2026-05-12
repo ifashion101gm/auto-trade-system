@@ -10,7 +10,8 @@ from app.events.event_types import (
     ORDER_OPENED, ORDER_CLOSED, ORDER_FILLED, ORDER_REJECTED,
     TP_HIT, SL_HIT, POSITION_UPDATED,
     SYNC_MISMATCH, API_ERROR, WEBSOCKET_DISCONNECTED, WEBSOCKET_RECONNECTED,
-    DAILY_SUMMARY_READY
+    DAILY_SUMMARY_READY, ORDER_STATE_CHANGED, RISK_VIOLATION_DETECTED,
+    RECOVERY_ACTION_TAKEN, RECONCILIATION_ACTION, SYNC_REPAIRED
 )
 import logging
 
@@ -41,6 +42,11 @@ class TelegramAgent:
         event_bus.subscribe(WEBSOCKET_DISCONNECTED, self._on_websocket_disconnected)
         event_bus.subscribe(WEBSOCKET_RECONNECTED, self._on_websocket_reconnected)
         event_bus.subscribe(DAILY_SUMMARY_READY, self._on_daily_summary)
+        event_bus.subscribe(ORDER_STATE_CHANGED, self._on_order_state_changed)
+        event_bus.subscribe(RISK_VIOLATION_DETECTED, self._on_risk_violation)
+        event_bus.subscribe(RECOVERY_ACTION_TAKEN, self._on_recovery_action)
+        event_bus.subscribe(RECONCILIATION_ACTION, self._on_reconciliation_action)
+        event_bus.subscribe(SYNC_REPAIRED, self._on_sync_repaired)
     
     async def _on_trade_opened(self, event):
         """Handle trade opened event with detailed info."""
@@ -59,6 +65,8 @@ Stop Loss: ${payload.get('stop_loss', 'N/A')}
 Take Profit: ${payload.get('take_profit', 'N/A')}
 Strategy: {payload.get('strategy_name', 'Unknown')}
 Risk: {payload.get('risk_pct', 'N/A')}%
+Slippage: {payload.get('slippage_pct', 'N/A')}%
+Latency: {payload.get('execution_latency_ms', 'N/A')}ms
 Order ID: {payload['order_id']}
         """.strip()
         
@@ -75,7 +83,10 @@ Order ID: {payload['order_id']}
 Symbol: {payload['symbol']}
 Side: {payload.get('side', 'N/A').upper()}
 Fill Price: ${payload['price']:,.2f}
+Requested Price: ${payload.get('requested_price', payload['price']):,.2f}
+Slippage: {payload.get('slippage_pct', 0):.4f}%
 Quantity: {payload.get('quantity', 'N/A')}
+Latency: {payload.get('latency_ms', 'N/A')}ms
 Order ID: {payload['order_id']}
         """.strip()
         
@@ -254,3 +265,109 @@ Top Strategy: {performance_data.get('best_strategy', 'N/A')}
         """.strip()
         
         await self.notifier.send_message(message)
+    
+    async def _on_order_state_changed(self, event):
+        """Handle critical order state changes."""
+        payload = event['payload']
+        from_state = payload.get('from_state', 'UNKNOWN')
+        to_state = payload.get('to_state', 'UNKNOWN')
+        
+        # Only alert on critical transitions
+        critical_states = ['REJECTED', 'CANCELED', 'EXPIRED', 'FAILED']
+        if to_state not in critical_states:
+            return
+        
+        message = f"""
+🚨 CRITICAL ORDER STATE CHANGE
+
+Symbol: {payload.get('symbol', 'Unknown')}
+Order ID: {payload.get('order_id', 'N/A')}
+Transition: {from_state} → {to_state}
+Reason: {payload.get('reason', 'N/A')}
+Exchange: {payload.get('exchange', 'Unknown')}
+        """.strip()
+        
+        await self.notifier.send_message(message)
+        logger.warning(f"📱 Telegram: Critical order state change alert sent")
+    
+    async def _on_risk_violation(self, event):
+        """Handle risk threshold breaches."""
+        payload = event['payload']
+        violation_type = payload.get('violation_type', 'Unknown')
+        risk_level = payload.get('risk_level', 'MEDIUM')
+        
+        emoji_map = {'LOW': '⚠️', 'MEDIUM': '🟡', 'HIGH': '🔴', 'CRITICAL': '🚨'}
+        emoji = emoji_map.get(risk_level, '⚠️')
+        
+        message = f"""
+{emoji} RISK VIOLATION DETECTED - {risk_level}
+
+Type: {violation_type}
+Symbol: {payload.get('symbol', 'N/A')}
+Description: {payload.get('description', 'N/A')}
+
+Metrics:
+• Current Value: {payload.get('current_value', 'N/A')}
+• Threshold: {payload.get('threshold', 'N/A')}
+• Action Taken: {payload.get('action_taken', 'None')}
+        """.strip()
+        
+        await self.notifier.send_message(message)
+        logger.warning(f"📱 Telegram: Risk violation alert sent ({risk_level})")
+    
+    async def _on_recovery_action(self, event):
+        """Handle automatic recovery actions."""
+        payload = event['payload']
+        
+        message = f"""
+🔧 AUTOMATIC RECOVERY ACTION
+
+Action: {payload.get('action', 'Unknown')}
+Context: {payload.get('context', 'N/A')}
+Status: {payload.get('status', 'N/A')}
+
+Details: {payload.get('details', 'N/A')}
+        """.strip()
+        
+        await self.notifier.send_message(message)
+        logger.info("📱 Telegram: Recovery action notification sent")
+    
+    async def _on_reconciliation_action(self, event):
+        """Handle position reconciliation events."""
+        payload = event['payload']
+        requires_review = payload.get('requires_review', False)
+        
+        emoji = "⚠️" if requires_review else "✅"
+        severity = "REQUIRES REVIEW" if requires_review else "AUTO-REPAIRED"
+        
+        message = f"""
+{emoji} RECONCILIATION - {severity}
+
+Symbol: {payload.get('symbol', 'N/A')}
+Exchange: {payload.get('exchange', 'Unknown')}
+Mismatch Type: {payload.get('mismatch_type', 'Unknown')}
+Action: {payload.get('action', 'N/A')}
+        """.strip()
+        
+        if payload.get('old_state'):
+            message += f"\nPrevious State: {payload['old_state']}"
+        if payload.get('new_state'):
+            message += f"\nNew State: {payload['new_state']}"
+        
+        await self.notifier.send_message(message)
+        logger.info(f"📱 Telegram: Reconciliation action notification sent ({severity})")
+    
+    async def _on_sync_repaired(self, event):
+        """Handle successful sync repair."""
+        payload = event['payload']
+        
+        message = f"""
+✅ SYNC REPAIRED
+
+Symbol: {payload.get('symbol', 'N/A')}
+Issue: {payload.get('issue', 'Unknown')}
+Resolution: {payload.get('resolution', 'Auto-repaired')}
+        """.strip()
+        
+        await self.notifier.send_message(message)
+        logger.info("📱 Telegram: Sync repair notification sent")

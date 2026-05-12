@@ -14,7 +14,7 @@ sys.path.insert(0, '/home/admin/.openclaw/workspace/auto-trade-system')
 from app.ai.orchestrator import AIAgentOrchestrator
 from app.storage.db import async_session_maker, init_db
 from app.storage.models import PaperTrades, DecisionJournal, StrategyEvaluations
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 
 
 async def validate_paper_trading_cycle():

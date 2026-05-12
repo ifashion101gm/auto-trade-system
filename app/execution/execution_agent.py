@@ -2,11 +2,13 @@
 Execution Agent - Executes validated trades on exchanges.
 Handles order lifecycle: OPEN → FILLED → CLOSED
 Persists all state changes to database.
+Enhanced with smart retry system and idempotency.
 """
 from app.exchange.exchange_router import ExchangeRouter
 from app.events.event_bus import event_bus
 from app.events.event_types import ORDER_OPENED, ORDER_CLOSED, API_ERROR
 from app.database.models import Trades
+from app.execution.retry_manager import SmartRetryManager, RetryConfig
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 import uuid
@@ -24,23 +26,32 @@ class ExecutionAgent:
     
     def __init__(self):
         self.router = ExchangeRouter()
+        self.retry_manager = SmartRetryManager(RetryConfig(max_retries=3))
     
     async def execute_trade(self, proposal, mode='DEMO', db_session: AsyncSession = None):
-        """Execute trade after validation."""
+        """Execute trade with smart retry and idempotency."""
         logger.info(f"⚡ Execution Agent: Executing {mode} trade...")
         
         try:
-            # Get appropriate exchange
-            exchange = self.router.get_exchange(mode)
+            # Generate idempotency key
+            client_order_id = self.retry_manager.idempotency_mgr.generate_client_order_id()
             
-            # Execute order
-            order_result = await exchange.open_position(
-                symbol=proposal['symbol'],
-                side=proposal['side'],
-                amount=proposal['quantity'],
-                leverage=proposal['leverage'],
-                stop_loss=proposal.get('stop_loss'),
-                take_profit=proposal.get('take_profit')
+            async def _place_order():
+                exchange = self.router.get_exchange(mode)
+                return await exchange.open_position(
+                    symbol=proposal['symbol'],
+                    side=proposal['side'],
+                    amount=proposal['quantity'],
+                    leverage=proposal['leverage'],
+                    stop_loss=proposal.get('stop_loss'),
+                    take_profit=proposal.get('take_profit')
+                )
+            
+            # Execute with retry logic
+            order_result = await self.retry_manager.execute_with_retry(
+                _place_order,
+                client_order_id=client_order_id,
+                operation_name=f"trade_execution_{proposal['symbol']}"
             )
             
             # Create trade record in database

@@ -9,6 +9,8 @@ Defines explicit states for the trading lifecycle to ensure:
 - Automatic recovery from transient failures
 """
 from enum import Enum
+from datetime import datetime
+from typing import List, Dict
 
 
 class ExecutionState(Enum):
@@ -196,3 +198,62 @@ def get_valid_next_order_states(current_state: OrderState) -> list:
         List of allowed next states
     """
     return ORDER_STATE_TRANSITIONS.get(current_state, [])
+
+
+# =============================================================================
+# Order Lifecycle Manager
+# =============================================================================
+
+
+class InvalidStateTransitionError(Exception):
+    """Raised when an invalid state transition is attempted."""
+    pass
+
+
+class OrderLifecycleManager:
+    """Manages order state transitions with strict validation."""
+    
+    def __init__(self):
+        self.transition_log = []
+    
+    def transition(self, order_id: str, from_state: OrderState, to_state: OrderState) -> bool:
+        """
+        Execute state transition with validation.
+        
+        Args:
+            order_id: Unique order identifier
+            from_state: Current order state
+            to_state: Target order state
+        
+        Returns:
+            True if transition was successful
+        
+        Raises:
+            InvalidStateTransitionError: If transition is not allowed
+        """
+        if not is_valid_order_state_transition(from_state, to_state):
+            raise InvalidStateTransitionError(
+                f"Invalid transition: {from_state.value} → {to_state.value}"
+            )
+        
+        # Log transition
+        self.transition_log.append({
+            'order_id': order_id,
+            'from_state': from_state.value,
+            'to_state': to_state.value,
+            'timestamp': datetime.utcnow().isoformat()
+        })
+        
+        return True
+    
+    def get_order_history(self, order_id: str) -> List[Dict]:
+        """
+        Get full state history for an order.
+        
+        Args:
+            order_id: Unique order identifier
+        
+        Returns:
+            List of state transition records
+        """
+        return [log for log in self.transition_log if log['order_id'] == order_id]

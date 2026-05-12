@@ -2,7 +2,7 @@
 AI orchestration API endpoints for monitoring and control.
 """
 from fastapi import APIRouter, HTTPException, Depends
-from app.ai.orchestrator import AIAgentOrchestrator
+from app.ai_agents.orchestrator import AIAgentOrchestrator
 
 router = APIRouter()
 

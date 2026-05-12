@@ -45,3 +45,73 @@ groups:
         annotations:
           summary: "Redis is down"
           description: "Redis instance is not responding"
+      
+      # High execution latency
+      - alert: HighExecutionLatency
+        expr: histogram_quantile(0.95, rate(trade_execution_latency_ms_bucket[5m])) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High trade execution latency detected"
+          description: "95th percentile latency is {{ $value }}ms (>1000ms threshold)"
+
+      # Frequent WebSocket reconnections
+      - alert: FrequentWebSocketReconnects
+        expr: rate(websocket_reconnect_total[1h]) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent WebSocket reconnections"
+          description: "{{ $value }} reconnects/hour on {{ $labels.exchange }}"
+
+      # High API failure rate
+      - alert: HighAPIFailureRate
+        expr: rate(api_failure_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High API failure rate"
+          description: "{{ $value }} failures/sec on {{ $labels.endpoint }}"
+
+      # Desync events detected
+      - alert: DesyncEventsDetected
+        expr: rate(desync_events_total[1h]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Position desynchronization detected"
+          description: "{{ $value }} desyncs/hour on {{ $labels.exchange }}"
+
+      # Circuit breaker open
+      - alert: CircuitBreakerOpen
+        expr: circuit_breaker_state == 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker is OPEN"
+          description: "Component {{ $labels.component }} has tripped circuit breaker"
+
+      # High daily drawdown
+      - alert: HighDailyDrawdown
+        expr: daily_drawdown_percentage > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High daily drawdown detected"
+          description: "Drawdown is {{ $value }}% (>5% threshold)"
+
+      # Order rejection spike
+      - alert: OrderRejectionSpike
+        expr: rate(order_rejection_total[30m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Increased order rejection rate"
+          description: "{{ $value }} rejections/min on {{ $labels.exchange }}"

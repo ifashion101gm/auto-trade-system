@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app.storage.db import async_session_maker
 from app.storage.models import PaperTrades, OrderEvents
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 
 
 class DeploymentValidator:

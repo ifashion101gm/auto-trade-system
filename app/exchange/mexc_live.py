@@ -28,6 +28,10 @@ class MEXCLiveExchange(BaseExchange):
         self.executor = ExchangeAdapter(executor)
         self._mode = 'LIVE'
         self._connected = False
+        
+    @property
+    def mode(self):
+        return self._mode
     
     async def open_position(self, symbol, side, amount, leverage=1, 
                            stop_loss=None, take_profit=None):

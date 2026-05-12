@@ -102,7 +102,7 @@ async def check_metrics():
 async def send_telegram_alert(title: str, message: str):
     """Send critical alert via Telegram."""
     try:
-        from app.infra.telegram_notifier import TelegramNotifier
+        from app.notifications.notifier import TelegramNotifier
         notifier = TelegramNotifier()
         
         alert_text = f"<b>🚨 {title}</b>\n\n{message}\n\n<i>Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"

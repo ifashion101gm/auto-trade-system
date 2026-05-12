@@ -12,14 +12,17 @@ from fastapi import APIRouter, Request, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.infra.rate_limit import RateLimiter
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 from app.database.connection import get_session
 from app.database.models import PaperTrades, TrailEvents, Signals
-from app.ai.orchestrator import AIAgentOrchestrator
+from app.ai_agents.orchestrator import AIAgentOrchestrator
 from app.strategy.strategy_manager import StrategyManager
 from app.strategy.signal_proposal import SignalProposal
 from app.risk.risk_engine import RiskEngine
 from app.execution.trading_service import LiveTradingService
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 router = APIRouter()
 
@@ -220,7 +223,7 @@ async def execute_gold_dual_trade(
         print(f"   Market data fetched: ${market_data['current_price']:,.2f}")
         
         # Run AI analysis cycle
-        from app.ai.orchestrator import AIAgentOrchestrator
+        from app.ai_agents.orchestrator import AIAgentOrchestrator
         orchestrator = AIAgentOrchestrator()
         
         ai_result = await orchestrator.run_paper_trade_cycle(
@@ -748,84 +751,213 @@ async def receive_tradingview_alert(
     await enforce_trading_rate_limit(request)
     
     try:
+        # Log webhook receipt
+        logger.info(f"📥 TradingView webhook received from IP: {request.client.host if request.client else 'unknown'}")
+        logger.debug(f"Webhook payload: {json.dumps(alert_data, indent=2)}")
+        
         # Step 1: Validate webhook payload
-        validated_signal = validate_tradingview_payload(alert_data)
+        validated_signal, validation_error = validate_tradingview_payload(alert_data)
         
         if not validated_signal:
-            raise HTTPException(status_code=400, detail="Invalid TradingView alert format")
+            logger.warning(f"❌ TradingView alert validation failed: {validation_error}")
+            raise HTTPException(status_code=400, detail=f"Invalid TradingView alert: {validation_error}")
         
-        logger.info(f"📥 Received TradingView alert: {validated_signal.side} {validated_signal.symbol}")
+        logger.info(f"✅ Validated TradingView signal: {validated_signal.side} {validated_signal.symbol} @ ${validated_signal.entry_price:,.2f}")
         
-        # Step 2: Save signal to database
+        # Send receipt confirmation notification
+        notifier = TelegramNotifier()
+        await notifier.send_message(
+            f"📥 TradingView Signal Received\n\n"
+            f"Symbol: {validated_signal.symbol}\n"
+            f"Side: {validated_signal.side}\n"
+            f"Price: ${validated_signal.entry_price:,.2f}\n"
+            f"Quantity: {validated_signal.quantity}\n"
+            f"Strategy: {validated_signal.strategy_name}\n"
+            f"Confidence: {validated_signal.confidence*100:.0f}%"
+        )
+        
+        # Step 2: Save signal to database with enhanced metadata
+        signal_id = str(uuid.uuid4())
         signal_record = Signals(
-            id=str(uuid.uuid4()),
+            id=signal_id,
             source='TRADINGVIEW_WEBHOOK',
-            symbol=validated_signal.symbol.replace('/', ''),
+            symbol=validated_signal.symbol.replace('/', ''),  # Store without slash for consistency
             signal_type=f"ENTRY_{validated_signal.side}",
             strength=validated_signal.confidence,
-            indicators_json=json.dumps(validated_signal.indicators),
+            indicators_json=json.dumps({
+                'entry_price': validated_signal.entry_price,
+                'stop_loss': validated_signal.stop_loss,
+                'take_profit': validated_signal.take_profit,
+                'quantity': validated_signal.quantity,
+                'leverage': validated_signal.leverage,
+                'strategy': validated_signal.strategy_name,
+                'regime': validated_signal.regime,
+            }),
             regime=validated_signal.regime,
             confidence=validated_signal.confidence,
-            processed=0
+            processed=0,  # 0=pending, 1=processed, 2=rejected
+            timestamp=datetime.utcnow()
         )
         db_session.add(signal_record)
         await db_session.flush()
         
+        logger.info(f"💾 Signal saved to database: ID={signal_id}")
+        
         # Step 3: Pass to Risk Engine for validation
+        user_id = alert_data.get('user_id', 'tradingview_user')
         risk_engine = RiskEngine(db_session=db_session)
         risk_decision = await risk_engine.check_trade_approval(
             proposal=validated_signal.to_dict(),
-            user_id="tradingview_user"
+            user_id=user_id
         )
         
         if not risk_decision.approved:
-            logger.warning(f"🚫 TradingView signal rejected by Risk Engine: {risk_decision.violations}")
+            logger.warning(f"🚫 TradingView signal REJECTED by Risk Engine:")
+            for violation in risk_decision.violations:
+                logger.warning(f"   - {violation}")
             
             # Update signal as rejected
             signal_record.processed = 2  # 2 = rejected
+            signal_record.notes = json.dumps({
+                'rejection_reason': 'risk_engine',
+                'violations': risk_decision.violations,
+                'risk_metrics': {
+                    'daily_pnl_pct': risk_decision.daily_pnl_pct,
+                    'drawdown_pct': risk_decision.current_drawdown_pct,
+                    'risk_score': risk_decision.risk_score
+                }
+            })
             await db_session.commit()
+            
+            # Send rejection notification
+            await notifier.send_message(
+                f"🚫 TradingView Signal Rejected\n\n"
+                f"Symbol: {validated_signal.symbol}\n"
+                f"Side: {validated_signal.side}\n"
+                f"Price: ${validated_signal.entry_price:,.2f}\n"
+                f"Violations:\n" + "\n".join([f"• {v}" for v in risk_decision.violations])
+            )
             
             return {
                 "status": "rejected",
                 "reason": "Risk Engine rejection",
-                "violations": risk_decision.violations
+                "violations": risk_decision.violations,
+                "signal_id": signal_record.id
             }
+        
+        logger.info(f"✅ Risk Engine approved signal (score: {risk_decision.risk_score})")
         
         # Step 4: Forward to Execution Engine
         execution_service = LiveTradingService()
         
         try:
+            logger.info(f"⚡ Executing TradingView signal (mode: {execution_service.execution_mode})...")
+            
             # Execute trade using existing execution logic
             execution_result = await execution_service._execute_trade(
                 proposal=validated_signal.to_dict(),
-                user_id="tradingview_user",
+                user_id=user_id,
                 db_session=db_session
             )
             
-            # Update signal record with trade ID
-            if execution_result.get('trade_id'):
-                signal_record.trade_id = str(execution_result['trade_id'])
-                signal_record.processed = 1  # 1 = processed
+            # Handle different execution outcomes
+            execution_status = execution_result.get('status', 'unknown')
             
-            await db_session.commit()
-            
-            return {
-                "status": "success",
-                "execution": execution_result,
-                "risk_metrics": {
-                    'daily_pnl_pct': risk_decision.daily_pnl_pct,
-                    'drawdown_pct': risk_decision.current_drawdown_pct,
-                    'risk_score': risk_decision.risk_score
+            if execution_status == 'executed':
+                logger.info(f"✅ Trade executed successfully: Order {execution_result.get('order_id')}")
+                
+                # Update signal record with trade ID
+                trade_id = execution_result.get('trade_id')
+                if trade_id:
+                    signal_record.trade_id = str(trade_id)
+                    signal_record.processed = 1  # 1 = processed
+                
+                # Send execution notification
+                await notifier.send_trade_entry(execution_result)
+                
+                await db_session.commit()
+                
+                return {
+                    "status": "executed",
+                    "execution": execution_result,
+                    "signal_id": signal_record.id,
+                    "trade_id": trade_id,
+                    "risk_metrics": {
+                        'daily_pnl_pct': risk_decision.daily_pnl_pct,
+                        'drawdown_pct': risk_decision.current_drawdown_pct,
+                        'risk_score': risk_decision.risk_score
+                    }
                 }
-            }
             
+            elif execution_status in ['proposal_only', 'awaiting_confirmation']:
+                logger.info(f"⏸️ Trade saved as proposal (requires confirmation)")
+                
+                # Update signal as pending
+                signal_record.processed = 0  # 0 = pending
+                signal_record.notes = json.dumps({
+                    'execution_status': execution_status,
+                    'message': execution_result.get('message'),
+                    'proposal_id': execution_result.get('proposal_id')
+                })
+                await db_session.commit()
+                
+                # Send proposal notification
+                await notifier.send_message(
+                    f"⏸️ TradingView Proposal Created\n\n"
+                    f"Symbol: {validated_signal.symbol}\n"
+                    f"Side: {validated_signal.side}\n"
+                    f"Status: Awaiting Confirmation\n"
+                    f"Message: {execution_result.get('message')}"
+                )
+                
+                return {
+                    "status": execution_status,
+                    "message": execution_result.get('message'),
+                    "proposal_id": execution_result.get('proposal_id'),
+                    "signal_id": signal_record.id
+                }
+            
+            elif execution_status == 'rejected':
+                logger.warning(f"🚫 Trade rejected during execution: {execution_result.get('violations')}")
+                
+                # Update signal as rejected
+                signal_record.processed = 2
+                signal_record.notes = json.dumps({
+                    'rejection_reason': 'execution_validator',
+                    'violations': execution_result.get('violations', [])
+                })
+                await db_session.commit()
+                
+                return {
+                    "status": "rejected",
+                    "reason": "Execution validation rejection",
+                    "violations": execution_result.get('violations', []),
+                    "signal_id": signal_record.id
+                }
+            
+            else:
+                raise Exception(f"Unexpected execution status: {execution_status}")
+        
         finally:
             await execution_service.close()
     
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"TradingView webhook processing failed: {e}")
+        logger.error(f"❌ TradingView webhook processing failed: {e}")
+        logger.exception("Full traceback:")
+        
+        # Send error notification
+        try:
+            notifier = TelegramNotifier()
+            await notifier.send_message(
+                f"🚨 TradingView Webhook Error\n\n"
+                f"Error: {str(e)[:200]}\n"  # Truncate long messages
+                f"Payload: {json.dumps(alert_data, indent=2)[:500]}"
+            )
+        except:
+            pass  # Don't fail if notification fails
+        
         raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
 
 
@@ -894,9 +1026,11 @@ async def generate_signal_from_strategies(
         raise HTTPException(status_code=500, detail=f"Signal generation failed: {str(e)}")
 
 
-def validate_tradingview_payload(data: dict) -> Optional[SignalProposal]:
+def validate_tradingview_payload(data: dict) -> tuple:
     """
     Validate and parse TradingView webhook payload.
+    
+    Returns: (SignalProposal, None) on success, (None, error_message) on failure
     
     Expected format:
     {
@@ -912,45 +1046,117 @@ def validate_tradingview_payload(data: dict) -> Optional[SignalProposal]:
     }
     """
     try:
-        # Required fields
+        # Check required fields
         required_fields = ['symbol', 'side', 'price', 'quantity']
         for field in required_fields:
             if field not in data:
-                logger.warning(f"Missing required field: {field}")
-                return None
+                return None, f"Missing required field: {field}"
         
-        # Normalize side
-        side_raw = data['side'].lower()
+        # Validate side
+        side_raw = str(data['side']).lower().strip()
         if side_raw in ['buy', 'long']:
             side = 'LONG'
         elif side_raw in ['sell', 'short']:
             side = 'SHORT'
         else:
-            logger.warning(f"Invalid side: {side_raw}")
-            return None
+            return None, f"Invalid side: {side_raw}. Must be 'buy', 'sell', 'long', or 'short'"
         
-        # Normalize symbol (add /USDT if missing)
-        symbol = data['symbol']
+        # Normalize symbol
+        symbol = str(data['symbol']).upper().strip()
+        # Remove perpetual suffix if present
+        symbol = symbol.replace('.P', '').replace('.PERP', '')
+        # Add / separator if missing
         if '/' not in symbol:
-            symbol = f"{symbol[:3]}/{symbol[3:]}" if len(symbol) == 6 else f"{symbol}/USDT"
+            if len(symbol) == 6:  # e.g., BTCUSDT
+                symbol = f"{symbol[:3]}/{symbol[3:]}"
+            elif symbol.endswith('USDT'):  # e.g., ETHUSDT
+                base = symbol[:-4]
+                symbol = f"{base}/USDT"
+            elif symbol.endswith('USD'):
+                base = symbol[:-3]
+                symbol = f"{base}/USD"
+            else:
+                return None, f"Cannot parse symbol format: {symbol}"
+        
+        # Validate numeric fields
+        try:
+            price = float(data['price'])
+            if price <= 0:
+                return None, f"Price must be positive: {price}"
+        except (ValueError, TypeError):
+            return None, f"Invalid price value: {data['price']}"
+        
+        try:
+            quantity = float(data['quantity'])
+            if quantity <= 0:
+                return None, f"Quantity must be positive: {quantity}"
+        except (ValueError, TypeError):
+            return None, f"Invalid quantity value: {data['quantity']}"
+        
+        # Optional fields with defaults
+        stop_loss = None
+        if data.get('stop_loss'):
+            try:
+                stop_loss = float(data['stop_loss'])
+                if stop_loss <= 0:
+                    stop_loss = None
+            except (ValueError, TypeError):
+                pass
+        
+        take_profit = None
+        if data.get('take_profit'):
+            try:
+                take_profit = float(data['take_profit'])
+                if take_profit <= 0:
+                    take_profit = None
+            except (ValueError, TypeError):
+                pass
+        
+        leverage = 1
+        if data.get('leverage'):
+            try:
+                leverage = int(float(data['leverage']))
+                if leverage < 1:
+                    leverage = 1
+            except (ValueError, TypeError):
+                pass
+        
+        confidence = 0.7
+        if data.get('confidence'):
+            try:
+                confidence = float(data['confidence'])
+                confidence = max(0.0, min(1.0, confidence))  # Clamp to [0, 1]
+            except (ValueError, TypeError):
+                pass
+        
+        strategy_name = str(data.get('strategy', 'tradingview_manual'))
+        # Sanitize strategy name
+        strategy_name = ''.join(c if c.isalnum() or c == '_' else '_' for c in strategy_name)
         
         # Build SignalProposal
-        return SignalProposal(
+        proposal = SignalProposal(
             symbol=symbol,
             side=side,
-            entry_price=float(data['price']),
-            stop_loss=float(data.get('stop_loss', 0)) or None,
-            take_profit=float(data.get('take_profit', 0)) or None,
-            quantity=float(data['quantity']),
-            leverage=int(data.get('leverage', 1)),
-            confidence=float(data.get('confidence', 0.7)),
-            strategy_name=data.get('strategy', 'tradingview_manual'),
+            entry_price=price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            quantity=quantity,
+            leverage=leverage,
+            confidence=confidence,
+            strategy_name=strategy_name,
+            regime='Normal',  # Default regime for external signals
+            indicators={
+                'source': 'tradingview_webhook',
+                'raw_timestamp': data.get('timestamp'),
+            },
             metadata={
                 'source': 'tradingview_webhook',
-                'raw_payload': data
+                'raw_payload': {k: v for k, v in data.items() if k != 'raw_payload'},
             }
         )
+        
+        return proposal, None
     
     except Exception as e:
         logger.error(f"Payload validation error: {e}")
-        return None
+        return None, f"Validation error: {str(e)}"

@@ -15,7 +15,7 @@ from app.config import settings
 from app.infra.binance_client import BinanceClient
 from app.storage.db import get_session
 from app.storage.models import PaperTrades
-from app.infra.telegram_notifier import TelegramNotifier
+from app.notifications.notifier import TelegramNotifier
 
 
 async def execute_gold_trade():

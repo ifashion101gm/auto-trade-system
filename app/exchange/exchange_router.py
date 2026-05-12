@@ -2,7 +2,7 @@
 Routes trade requests to appropriate exchange based on mode.
 Supports simultaneous LIVE and DEMO execution.
 """
-from app.exchange.mexc_live import MEXCLiveExchange
+from app.exchange.bybit_connector import BybitConnector
 from app.exchange.mexc_demo import MEXCDemoExchange
 from app.config import settings
 import logging
@@ -17,8 +17,8 @@ class ExchangeRouter:
     """
     
     def __init__(self):
-        self.live_exchange = MEXCLiveExchange()
-        self.demo_exchange = MEXCDemoExchange()
+        self.live_exchange = BybitConnector(demo_trading=False)
+        self.demo_exchange = BybitConnector(demo_trading=True)
     
     def get_exchange(self, mode: str = None):
         """Get exchange instance by mode."""
