@@ -48,6 +48,13 @@ This repository contains enterprise-grade infrastructure components for automate
 - WebSocket-based real-time position updates
 - Telegram notifications for trade events
 
+### 8. Enhanced Production Monitoring (NEW)
+- **Order State Tracking**: Real-time lifecycle monitoring with ORDER_STATE_CHANGED events
+- **Risk Violation Alerts**: Immediate notifications for HIGH/CRITICAL risk breaches
+- **Reconciliation Monitoring**: Automated mismatch detection and repair alerts
+- **Advanced Query Tools**: Pre-built scripts for risk, recovery, and execution analysis
+- **Event Store Integration**: Complete audit trail for all critical operations
+
 ## 🚀 Quick Start
 
 ```bash
@@ -66,6 +73,23 @@ python migrate.py upgrade
 
 # Enable automated backups
 sudo systemctl enable --now vmassit-backup.timer
+```
+
+### Production Monitoring Setup (NEW)
+
+```bash
+# Test enhanced notifications
+python scripts/test_enhanced_notifications.py
+
+# Run monitoring queries
+python scripts/production_monitoring_queries.py
+
+# Deploy all enhancements
+./deploy_production_enhancements.sh
+
+# View documentation
+cat PRODUCTION_ENHANCED_MONITORING.md
+cat QUICK_REFERENCE_PRODUCTION_MONITORING.md
 ```
 
 ## 📚 Installation & Technology References
