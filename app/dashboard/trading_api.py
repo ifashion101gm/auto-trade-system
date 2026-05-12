@@ -5,15 +5,21 @@ and Telegram notifications.
 """
 import hmac
 import json
+import uuid
 from datetime import datetime
+from typing import Optional
 from fastapi import APIRouter, Request, HTTPException, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.infra.rate_limit import RateLimiter
 from app.infra.telegram_notifier import TelegramNotifier
 from app.database.connection import get_session
-from app.database.models import PaperTrades, TrailEvents
+from app.database.models import PaperTrades, TrailEvents, Signals
 from app.ai.orchestrator import AIAgentOrchestrator
+from app.strategy.strategy_manager import StrategyManager
+from app.strategy.signal_proposal import SignalProposal
+from app.risk.risk_engine import RiskEngine
+from app.execution.trading_service import LiveTradingService
 
 router = APIRouter()
 
@@ -699,3 +705,252 @@ async def run_reconciliation(
     service = ReconciliationService()
     await service.reconcile(mode, db_session)
     return {"status": "completed"}
+
+
+# =============================================================================
+# TradingView Webhook Integration
+# =============================================================================
+
+@router.post("/webhooks/tradingview")
+async def receive_tradingview_alert(
+    request: Request,
+    alert_data: dict,
+    auth: str = None,
+    db_session: AsyncSession = Depends(get_session)
+):
+    """
+    Receive TradingView webhook alerts and process through Signal Engine.
+    
+    Flow:
+    1. Validate webhook payload format
+    2. Convert to internal SignalProposal
+    3. Pass to Risk Engine for approval
+    4. Forward to Execution Engine if approved
+    
+    Expected TradingView Alert Format:
+    {
+        "strategy": "breakout",  // optional
+        "symbol": "BTCUSDT",
+        "side": "buy",  // or "sell"
+        "price": 50000.0,
+        "quantity": 0.01,
+        "stop_loss": 49000.0,
+        "take_profit": 52000.0,
+        "leverage": 1,
+        "confidence": 0.75,
+        "timestamp": "2026-05-12T10:30:00Z"
+    }
+    """
+    # Verify authentication
+    verify_trading_secret(auth)
+    
+    # Enforce rate limit
+    await enforce_trading_rate_limit(request)
+    
+    try:
+        # Step 1: Validate webhook payload
+        validated_signal = validate_tradingview_payload(alert_data)
+        
+        if not validated_signal:
+            raise HTTPException(status_code=400, detail="Invalid TradingView alert format")
+        
+        logger.info(f"📥 Received TradingView alert: {validated_signal.side} {validated_signal.symbol}")
+        
+        # Step 2: Save signal to database
+        signal_record = Signals(
+            id=str(uuid.uuid4()),
+            source='TRADINGVIEW_WEBHOOK',
+            symbol=validated_signal.symbol.replace('/', ''),
+            signal_type=f"ENTRY_{validated_signal.side}",
+            strength=validated_signal.confidence,
+            indicators_json=json.dumps(validated_signal.indicators),
+            regime=validated_signal.regime,
+            confidence=validated_signal.confidence,
+            processed=0
+        )
+        db_session.add(signal_record)
+        await db_session.flush()
+        
+        # Step 3: Pass to Risk Engine for validation
+        risk_engine = RiskEngine(db_session=db_session)
+        risk_decision = await risk_engine.check_trade_approval(
+            proposal=validated_signal.to_dict(),
+            user_id="tradingview_user"
+        )
+        
+        if not risk_decision.approved:
+            logger.warning(f"🚫 TradingView signal rejected by Risk Engine: {risk_decision.violations}")
+            
+            # Update signal as rejected
+            signal_record.processed = 2  # 2 = rejected
+            await db_session.commit()
+            
+            return {
+                "status": "rejected",
+                "reason": "Risk Engine rejection",
+                "violations": risk_decision.violations
+            }
+        
+        # Step 4: Forward to Execution Engine
+        execution_service = LiveTradingService()
+        
+        try:
+            # Execute trade using existing execution logic
+            execution_result = await execution_service._execute_trade(
+                proposal=validated_signal.to_dict(),
+                user_id="tradingview_user",
+                db_session=db_session
+            )
+            
+            # Update signal record with trade ID
+            if execution_result.get('trade_id'):
+                signal_record.trade_id = str(execution_result['trade_id'])
+                signal_record.processed = 1  # 1 = processed
+            
+            await db_session.commit()
+            
+            return {
+                "status": "success",
+                "execution": execution_result,
+                "risk_metrics": {
+                    'daily_pnl_pct': risk_decision.daily_pnl_pct,
+                    'drawdown_pct': risk_decision.current_drawdown_pct,
+                    'risk_score': risk_decision.risk_score
+                }
+            }
+            
+        finally:
+            await execution_service.close()
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TradingView webhook processing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Webhook processing failed: {str(e)}")
+
+
+@router.post("/signals/generate")
+async def generate_signal_from_strategies(
+    request: Request,
+    market_data: dict,
+    auth: str = None,
+    db_session: AsyncSession = Depends(get_session)
+):
+    """
+    Generate trade signal using internal strategy engine.
+    
+    This endpoint runs all configured strategies on provided market data
+    and returns the best signal (after AI filtering).
+    
+    Flow:
+    1. Run all strategies in parallel
+    2. Apply AI filter validation
+    3. Select highest-confidence signal
+    4. Return signal proposal (does NOT execute)
+    """
+    # Verify authentication
+    verify_trading_secret(auth)
+    
+    # Enforce rate limit
+    await enforce_trading_rate_limit(request)
+    
+    try:
+        # Initialize strategy manager
+        strategy_mgr = StrategyManager(use_ai_filter=True)
+        
+        # Generate signals
+        signal = await strategy_mgr.generate_signals(market_data)
+        
+        if not signal:
+            return {
+                "status": "no_signal",
+                "message": "No valid signals generated by any strategy"
+            }
+        
+        # Save signal to database
+        signal_record = Signals(
+            id=str(uuid.uuid4()),
+            source=f"STRATEGY_{signal.strategy_name.upper()}",
+            symbol=signal.symbol.replace('/', ''),
+            signal_type=f"ENTRY_{signal.side}",
+            strength=signal.confidence,
+            indicators_json=json.dumps(signal.indicators),
+            regime=signal.regime,
+            confidence=signal.confidence,
+            processed=0
+        )
+        db_session.add(signal_record)
+        await db_session.commit()
+        
+        return {
+            "status": "success",
+            "signal": signal.to_dict(),
+            "signal_id": signal_record.id,
+            "next_step": "Send this signal to /trades/execute for execution"
+        }
+    
+    except Exception as e:
+        logger.error(f"Signal generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Signal generation failed: {str(e)}")
+
+
+def validate_tradingview_payload(data: dict) -> Optional[SignalProposal]:
+    """
+    Validate and parse TradingView webhook payload.
+    
+    Expected format:
+    {
+        "strategy": "breakout",
+        "symbol": "BTCUSDT",
+        "side": "buy",
+        "price": 50000.0,
+        "quantity": 0.01,
+        "stop_loss": 49000.0,
+        "take_profit": 52000.0,
+        "leverage": 1,
+        "confidence": 0.75
+    }
+    """
+    try:
+        # Required fields
+        required_fields = ['symbol', 'side', 'price', 'quantity']
+        for field in required_fields:
+            if field not in data:
+                logger.warning(f"Missing required field: {field}")
+                return None
+        
+        # Normalize side
+        side_raw = data['side'].lower()
+        if side_raw in ['buy', 'long']:
+            side = 'LONG'
+        elif side_raw in ['sell', 'short']:
+            side = 'SHORT'
+        else:
+            logger.warning(f"Invalid side: {side_raw}")
+            return None
+        
+        # Normalize symbol (add /USDT if missing)
+        symbol = data['symbol']
+        if '/' not in symbol:
+            symbol = f"{symbol[:3]}/{symbol[3:]}" if len(symbol) == 6 else f"{symbol}/USDT"
+        
+        # Build SignalProposal
+        return SignalProposal(
+            symbol=symbol,
+            side=side,
+            entry_price=float(data['price']),
+            stop_loss=float(data.get('stop_loss', 0)) or None,
+            take_profit=float(data.get('take_profit', 0)) or None,
+            quantity=float(data['quantity']),
+            leverage=int(data.get('leverage', 1)),
+            confidence=float(data.get('confidence', 0.7)),
+            strategy_name=data.get('strategy', 'tradingview_manual'),
+            metadata={
+                'source': 'tradingview_webhook',
+                'raw_payload': data
+            }
+        )
+    
+    except Exception as e:
+        logger.error(f"Payload validation error: {e}")
+        return None

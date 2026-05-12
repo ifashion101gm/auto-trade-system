@@ -25,12 +25,13 @@ class AIAgentOrchestrator:
     - Reduces cycle latency by ~200-400ms per cycle
     """
     
-    def __init__(self, use_openrouter: bool = True):
+    def __init__(self, use_openrouter: bool = True, risk_engine=None):
         """
         Initialize AI orchestrator.
         
         Args:
             use_openrouter: Whether to use OpenRouter for LLM calls (default: True)
+            risk_engine: Optional RiskEngine instance for pre-trade validation
         """
         self._consecutive_failures = 0
         self._failure_threshold = 3
@@ -40,6 +41,9 @@ class AIAgentOrchestrator:
         # Strategy performance tracking for meta-learning
         self._strategy_performance = {}  # {strategy_name: {'wins': 0, 'losses': 0, 'total': 0}}
         self._kill_switch = {}  # {strategy_name: disabled_until_timestamp}
+        
+        # Optional risk engine injection
+        self.risk_engine = risk_engine
         
         # Initialize OpenRouter client if enabled
         self.use_openrouter = use_openrouter
@@ -354,6 +358,21 @@ class AIAgentOrchestrator:
             # Check circuit breaker
             if self._paused:
                 raise RuntimeError(f"Orchestrator paused: {self._pause_reason}")
+            
+            # Optional: Check risk engine if injected
+            if hasattr(self, 'risk_engine') and self.risk_engine:
+                risk_decision = await self.risk_engine.check_trade_approval(
+                    proposal={'confidence': 0.5, 'symbol': market_data.get('symbol', '')},
+                    user_id=user_id
+                )
+                if not risk_decision.approved:
+                    logger.warning(f"⚠️  Trade vetoed by RiskEngine: {risk_decision.violations}")
+                    return {
+                        "status": "risk_rejected",
+                        "reason": "; ".join(risk_decision.violations),
+                        "cycle_time_ms": round((time.time() - start_time) * 1000, 2),
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
             
             # Step 1: Run independent agents in parallel
             regime = await self.detect_regime(market_data)

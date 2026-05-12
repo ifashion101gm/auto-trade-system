@@ -4,7 +4,7 @@ Sends structured trade reports to Telegram upon trade events.
 """
 import httpx
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from app.config import settings
 
 
@@ -672,5 +672,105 @@ class TelegramNotifier:
 
 <i>This trade did not meet minimum quality standards and was blocked before validation.</i>
         """.strip()
+        
+        return await self.send_message(message)
+
+    async def send_risk_alert(self, alert_type: str, details: Dict[str, Any]) -> bool:
+        """
+        Send risk management alert.
+        
+        Args:
+            alert_type: Type of risk alert (daily_loss, drawdown, cooldown, etc.)
+            details: Alert details dictionary
+            
+        Returns:
+            True if sent successfully
+        """
+        icons = {
+            'daily_loss': '📉',
+            'drawdown': '📊',
+            'cooldown': '⏸️ ',
+            'volatility': '🌪️ ',
+            'position_limit': '⚖️ ',
+            'leverage_limit': '🔒'
+        }
+        
+        icon = icons.get(alert_type, '⚠️ ')
+        title = alert_type.replace('_', ' ').title()
+        
+        message = f"{icon} <b>Risk Alert: {title}</b>\n\n"
+        for key, value in details.items():
+            formatted_key = key.replace('_', ' ').title()
+            message += f"• {formatted_key}: {value}\n"
+        
+        message += f"\n<i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
+        
+        return await self.send_message(message)
+
+    async def send_circuit_breaker_alert(self, state: str, reason: str, 
+                                         metrics: Dict[str, Any]) -> bool:
+        """
+        Send circuit breaker activation/recovery alert.
+        
+        Args:
+            state: Circuit state (OPEN, CLOSED, HALF_OPEN)
+            reason: Reason for state change
+            metrics: System health metrics snapshot
+            
+        Returns:
+            True if sent successfully
+        """
+        state_icons = {
+            'OPEN': '🚨',
+            'HALF_OPEN': '🔧',
+            'CLOSED': '✅'
+        }
+        
+        icon = state_icons.get(state, '⚠️ ')
+        severity = "CRITICAL" if state == 'OPEN' else "WARNING" if state == 'HALF_OPEN' else "INFO"
+        
+        message = f"{icon} <b>Circuit Breaker {severity}</b>\n\n"
+        message += f"<b>State:</b> {state}\n"
+        message += f"<b>Reason:</b> {reason}\n\n"
+        
+        if metrics:
+            message += "<b>System Metrics:</b>\n"
+            if 'api_failures' in metrics:
+                message += f"• API Failures: {metrics['api_failures']}\n"
+            if 'avg_slippage' in metrics:
+                message += f"• Avg Slippage: {metrics['avg_slippage']:.3%}\n"
+            if 'avg_latency' in metrics:
+                message += f"• Avg Latency: {metrics['avg_latency']:.0f}ms\n"
+            if 'position_sync' in metrics:
+                message += f"• Position Sync: {'✅ OK' if metrics['position_sync'] else '❌ MISMATCH'}\n"
+        
+        message += f"\n<i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
+        
+        return await self.send_message(message)
+
+    async def send_emergency_position_closure(self, closed_positions: List[Dict], 
+                                              reason: str) -> bool:
+        """
+        Send alert for emergency position closures.
+        
+        Args:
+            closed_positions: List of closed position details
+            reason: Reason for emergency closure
+            
+        Returns:
+            True if sent successfully
+        """
+        message = f"🚨 <b>EMERGENCY: Positions Closed</b>\n\n"
+        message += f"<b>Reason:</b> {reason}\n\n"
+        message += f"<b>Closed Positions ({len(closed_positions)}):</b>\n"
+        
+        total_pnl = 0
+        for pos in closed_positions:
+            pnl = pos.get('pnl', 0)
+            total_pnl += pnl
+            message += f"• {pos['symbol']} {pos['side']}: ${abs(pnl):.2f} {'profit' if pnl > 0 else 'loss'}\n"
+        
+        message += f"\n<b>Total P&L:</b> ${total_pnl:.2f}\n"
+        message += f"\n<i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
         
         return await self.send_message(message)

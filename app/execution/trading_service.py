@@ -18,6 +18,8 @@ from app.infra.exchange_manager import UnifiedExchangeManager
 from app.infra.hybrid_exchange_manager import HybridExchangeManager
 from app.notifications.notifier import TelegramNotifier
 from app.risk.validator import TradeValidator
+from app.risk.risk_engine import RiskEngine
+from app.infra.circuit_breaker import SystemCircuitBreaker
 from app.database.models import PaperTrades, DecisionJournal, StrategyEvaluations, TradeProposals
 from app.learning.param_cache import LearningParameterCache
 from app.logging_config import get_logger
@@ -67,6 +69,10 @@ class LiveTradingService:
         self.notifier = TelegramNotifier()
         self.validator = TradeValidator()
         self.param_cache = LearningParameterCache()
+        
+        # Initialize risk engine and circuit breaker
+        self.risk_engine = RiskEngine(db_session=None)  # Will be set per request
+        self.circuit_breaker = SystemCircuitBreaker(notifier=self.notifier)
         
         # State machine tracking
         self.current_state = ExecutionState.IDLE
@@ -157,6 +163,14 @@ class LiveTradingService:
         }
         
         try:
+            # Check circuit breaker before starting cycle
+            health_state = await self.circuit_breaker.check_system_health()
+            if not health_state.can_trade:
+                logger.warning(f"⚠️  Trading blocked by circuit breaker: {health_state.reason}")
+                results['status'] = 'blocked'
+                results['circuit_breaker_reason'] = health_state.reason
+                return results
+            
             # Transition: IDLE -> FETCHING_DATA
             await self._transition_to(ExecutionState.FETCHING_DATA)
             
@@ -166,6 +180,19 @@ class LiveTradingService:
             results['stages']['market_data'] = 'success'
             results['market_data'] = market_data
             logger.info(f"   ✅ Current price: ${market_data['current_price']:,.2f}")
+            
+            # Check market conditions via risk engine
+            volatility_check = await self.risk_engine.check_volatility_chaos(symbol)
+            if volatility_check:
+                logger.warning(f"⚠️  Market volatility too high for {symbol}, skipping trade")
+                results['status'] = 'skipped_high_volatility'
+                return results
+            
+            slippage_check = await self.risk_engine.check_slippage_risk(symbol)
+            if not slippage_check['approved']:
+                logger.warning(f"⚠️  Spread too wide for {symbol}: {slippage_check['spread_pct']:.3%}")
+                results['status'] = 'skipped_wide_spread'
+                return results
             
             # Transition: FETCHING_DATA -> ANALYZING
             await self._transition_to(ExecutionState.ANALYZING)
@@ -232,13 +259,79 @@ class LiveTradingService:
             # Transition: PROPOSING -> VALIDATING
             await self._transition_to(ExecutionState.VALIDATING)
             
-            # Stage 4: Execute Order (based on execution mode)
-            logger.info(f"\n⚡ Stage 4: Executing order (mode: {self.execution_mode})...")
-            execution_result = await self._execute_trade(
+            # Stage 4: Risk Engine Validation
+            logger.info("\n🛡️  Stage 4: Running risk engine validation...")
+            risk_decision = await self.risk_engine.check_trade_approval(
                 proposal=proposal,
-                user_id=user_id,
-                db_session=db_session
+                user_id=user_id
             )
+            
+            if not risk_decision.approved:
+                logger.warning(f"   ❌ Trade rejected by risk engine:")
+                for violation in risk_decision.violations:
+                    logger.warning(f"      - {violation}")
+                
+                results['stages']['risk_validation'] = 'rejected'
+                results['risk_violations'] = risk_decision.violations
+                results['status'] = 'risk_rejected'
+                
+                # Send rejection notification
+                await self.notifier.send_message(
+                    f"🚫 Trade Rejected by Risk Engine\n\n"
+                    f"Symbol: {symbol}\n"
+                    f"Violations:\n" + "\n".join([f"• {v}" for v in risk_decision.violations])
+                )
+                
+                return results
+            
+            if risk_decision.warnings:
+                logger.warning(f"   ⚠️  Risk warnings:")
+                for warning in risk_decision.warnings:
+                    logger.warning(f"      - {warning}")
+            
+            results['stages']['risk_validation'] = 'passed'
+            results['risk_metrics'] = {
+                'daily_pnl_pct': risk_decision.daily_pnl_pct,
+                'drawdown_pct': risk_decision.current_drawdown_pct,
+                'position_size_pct': risk_decision.position_size_pct,
+                'risk_score': risk_decision.risk_score
+            }
+            
+            # Stage 5: Execute Order (based on execution mode)
+            logger.info(f"\n⚡ Stage 5: Executing order (mode: {self.execution_mode})...")
+            execution_start = time.time()
+            
+            try:
+                execution_result = await self._execute_trade(
+                    proposal=proposal,
+                    user_id=user_id,
+                    db_session=db_session
+                )
+                
+                # Record API call success for circuit breaker
+                execution_time_ms = (time.time() - execution_start) * 1000
+                await self.circuit_breaker.record_api_call(
+                    success=True,
+                    latency_ms=execution_time_ms,
+                    endpoint='create_market_order'
+                )
+                
+                # Record slippage if order executed
+                if execution_result['status'] == 'executed':
+                    await self.circuit_breaker.record_fill_slippage(
+                        symbol=symbol,
+                        expected_price=proposal['entry_price'],
+                        actual_price=execution_result.get('filled_price', proposal['entry_price'])
+                    )
+                
+            except Exception as e:
+                # Record API failure for circuit breaker
+                await self.circuit_breaker.record_api_call(
+                    success=False,
+                    latency_ms=(time.time() - execution_start) * 1000,
+                    endpoint='create_market_order'
+                )
+                raise
             
             results['stages']['execution'] = execution_result['status']
             results['execution'] = execution_result

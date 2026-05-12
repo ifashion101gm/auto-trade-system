@@ -86,6 +86,12 @@ class MEXCWebSocketManager:
         self._connected_since: Optional[float] = None
         self._total_downtime_seconds = 0
         self._disconnect_count = 0
+        
+        # Circuit breaker for persistent failures
+        self.circuit_breaker_threshold = 50  # Alert after 50 consecutive failures
+        self.circuit_breaker_active = False
+        self.last_alert_time: Optional[float] = None
+        self.alert_cooldown = 3600  # Don't spam alerts (1 hour cooldown)
     
     def _get_ws_url(self) -> str:
         """Get WebSocket URL based on market type."""
@@ -133,6 +139,11 @@ class MEXCWebSocketManager:
                 self.reconnect_delay = self.base_reconnect_delay
                 self.reconnect_attempts = 0
                 
+                # Reset circuit breaker on successful reconnect
+                if self.circuit_breaker_active:
+                    logger.info("✅ Circuit breaker RESET - WebSocket reconnected successfully")
+                    self.circuit_breaker_active = False
+                
                 # Start heartbeat monitoring (Hummingbot pattern)
                 self._heartbeat_task = asyncio.create_task(self._monitor_heartbeat())
                 
@@ -152,9 +163,26 @@ class MEXCWebSocketManager:
                 
             except websockets.exceptions.ConnectionClosed as e:
                 logger.warning(f"WebSocket connection closed: {e}")
+                logger.warning(f"   Code: {e.code if hasattr(e, 'code') else 'N/A'}")
+                logger.warning(f"   Reason: {e.reason if hasattr(e, 'reason') else 'N/A'}")
+                logger.warning(f"   Reconnect attempt #{self.reconnect_attempts + 1}")
+                await self._handle_reconnect()
+            except websockets.exceptions.InvalidStatusCode as e:
+                logger.error(f"❌ WebSocket connection REJECTED with HTTP {e.status_code}")
+                logger.error(f"   This usually indicates:")
+                logger.error(f"   - Invalid WebSocket URL")
+                logger.error(f"   - Firewall/proxy blocking WSS connections")
+                logger.error(f"   - IP address banned by MEXC")
+                logger.error(f"   - MEXC service temporarily unavailable")
+                logger.error(f"   Attempting reconnect anyway...")
+                await self._handle_reconnect()
+            except ConnectionRefusedError as e:
+                logger.error(f"❌ Connection REFUSED: {e}")
+                logger.error(f"   Check firewall settings and network connectivity")
                 await self._handle_reconnect()
             except Exception as e:
-                logger.error(f"WebSocket error: {e}")
+                logger.error(f"❌ WebSocket error: {type(e).__name__}: {e}")
+                logger.error(f"   Full traceback:", exc_info=True)
                 await self._handle_reconnect()
     
     async def subscribe(self, channel: str, symbol: str):
@@ -287,6 +315,40 @@ class MEXCWebSocketManager:
         # Increment attempt counter
         self.reconnect_attempts = getattr(self, 'reconnect_attempts', 0) + 1
         
+        # Circuit breaker: Check if we've exceeded threshold
+        if self.reconnect_attempts >= self.circuit_breaker_threshold and not self.circuit_breaker_active:
+            self.circuit_breaker_active = True
+            logger.error(
+                f"\n{'🚨'*30}\n"
+                f"CIRCUIT BREAKER ACTIVATED!\n"
+                f"WebSocket has failed {self.reconnect_attempts} consecutive times.\n"
+                f"This indicates a PERSISTENT connectivity issue.\n"
+                f"{'🚨'*30}\n"
+            )
+            
+            # Send Telegram alert (with cooldown)
+            current_time = time.time()
+            if not self.last_alert_time or (current_time - self.last_alert_time) > self.alert_cooldown:
+                try:
+                    from app.notifications.notifier import TelegramNotifier
+                    notifier = TelegramNotifier()
+                    await notifier.send_message(
+                        f"🚨 WEBSOCKET CIRCUIT BREAKER ACTIVATED\n\n"
+                        f"MEXC WebSocket has failed {self.reconnect_attempts} consecutive reconnection attempts.\n\n"
+                        f"This indicates a persistent issue:\n"
+                        f"• Invalid API credentials\n"
+                        f"• Firewall blocking WSS connections\n"
+                        f"• MEXC service outage\n"
+                        f"• IP address banned\n\n"
+                        f"Action required: Run diagnostic script\n"
+                        f"`python scripts/diagnose_websocket.py`\n\n"
+                        f"System will continue retrying but you should investigate."
+                    )
+                    self.last_alert_time = current_time
+                    logger.info("✅ Telegram alert sent")
+                except Exception as e:
+                    logger.error(f"Failed to send Telegram alert: {e}")
+        
         # Calculate delay with exponential backoff
         delay = min(
             self.base_reconnect_delay * (2 ** (self.reconnect_attempts - 1)),
@@ -297,19 +359,30 @@ class MEXCWebSocketManager:
         jitter = delay * self.jitter_factor * random.random()
         delay_with_jitter = delay + jitter
         
+        # Enhanced logging for debugging
+        logger.warning(
+            f"\n{'='*60}\n"
+            f"⚠️  WEBSOCKET DISCONNECTED\n"
+            f"{'='*60}\n"
+            f"Reconnect attempt #{self.reconnect_attempts}\n"
+            f"Base delay: {self.base_reconnect_delay}s\n"
+            f"Calculated delay: {delay:.1f}s (capped at {self.max_reconnect_delay}s)\n"
+            f"Jitter: {jitter:.1f}s ({self.jitter_factor*100:.0f}%)\n"
+            f"Next retry in: {delay_with_jitter:.1f}s\n"
+            f"Total disconnects so far: {self._disconnect_count}\n"
+            f"Circuit breaker: {'ACTIVE 🚨' if self.circuit_breaker_active else 'inactive'}\n"
+            f"{'='*60}"
+        )
+        
         await event_bus.publish(WEBSOCKET_DISCONNECTED, {
             'message': 'WebSocket disconnected, attempting reconnect',
             'reconnect_delay': round(delay_with_jitter, 2),
             'attempt_count': self.reconnect_attempts,
-            'max_attempts': self.max_reconnect_attempts if self.max_reconnect_attempts > 0 else 'unlimited'
+            'max_attempts': self.max_reconnect_attempts if self.max_reconnect_attempts > 0 else 'unlimited',
+            'total_disconnects': self._disconnect_count,
+            'circuit_breaker_active': self.circuit_breaker_active
         })
         
-        logger.info(
-            f"🔄 Reconnecting in {delay_with_jitter:.1f}s... "
-            f"(attempt #{self.reconnect_attempts}, "
-            f"base={self.base_reconnect_delay}s, max={self.max_reconnect_delay}s, "
-            f"jitter={self.jitter_factor*100:.0f}%)"
-        )
         await asyncio.sleep(delay_with_jitter)
     
     async def _resubscribe(self):

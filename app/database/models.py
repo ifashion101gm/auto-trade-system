@@ -147,6 +147,49 @@ class TradeProposals(Base):
     )
 
 
+class RiskMetrics(Base):
+    """Daily risk metrics tracking."""
+    __tablename__ = 'risk_metrics'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    date = Column(Text, nullable=False)  # YYYY-MM-DD
+    user_id = Column(Text, nullable=False)
+    starting_balance = Column(Float, nullable=False)
+    current_balance = Column(Float, nullable=False)
+    daily_pnl = Column(Float, nullable=False, server_default='0')
+    daily_pnl_pct = Column(Float, nullable=False, server_default='0')
+    max_drawdown_pct = Column(Float, nullable=False, server_default='0')
+    peak_balance = Column(Float, nullable=False)
+    trade_count = Column(Integer, nullable=False, server_default='0')
+    win_count = Column(Integer, nullable=False, server_default='0')
+    loss_count = Column(Integer, nullable=False, server_default='0')
+    consecutive_losses = Column(Integer, nullable=False, server_default='0')
+    updated_at = Column(Text, nullable=False)
+
+    __table_args__ = (
+        Index('idx_risk_metrics_user_date', 'user_id', 'date'),
+    )
+
+
+class CircuitBreakerEvents(Base):
+    """Circuit breaker trigger events log."""
+    __tablename__ = 'circuit_breaker_events'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ts = Column(Text, nullable=False)
+    event_type = Column(Text, nullable=False)  # TRIGGERED, RECOVERED, TESTED
+    reason = Column(Text, nullable=False)
+    severity = Column(Text, nullable=False)  # warning, critical, emergency
+    metrics_snapshot = Column(Text, nullable=True)  # JSON
+    action_taken = Column(Text, nullable=False)
+    resolved_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index('idx_cb_events_ts', 'ts'),
+        Index('idx_cb_events_type', 'event_type'),
+    )
+
+
 class StrategyParameters(Base):
     __tablename__ = 'strategy_parameters'
 

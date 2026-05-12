@@ -53,6 +53,18 @@ class Settings(BaseSettings):
     BYBIT_API_KEY: Optional[str] = None
     BYBIT_API_SECRET: Optional[str] = None
     
+    # Bybit Demo Trading (separate credentials and domain)
+    BYBIT_DEMO_API_KEY: Optional[str] = None
+    BYBIT_DEMO_API_SECRET: Optional[str] = None
+    BYBIT_USE_DEMO_DOMAIN: bool = False  # Use api-demo.bybit.com instead of api.bybit.com
+    
+    # Bybit Client Configuration
+    BYBIT_CLIENT_LIBRARY: str = "ccxt"  # Options: "ccxt" (default), "pybit" (official SDK)
+    BYBIT_RATE_LIMIT_ENABLED: bool = True
+    BYBIT_RATE_LIMIT_CALLS_PER_SECOND: int = 10  # Bybit default: 10 requests/sec for authenticated endpoints
+    BYBIT_CATEGORY: str = "linear"  # Options: "linear", "inverse", "spot", "option"
+    BYBIT_RECV_WINDOW: int = 5000  # Request recv_window in milliseconds (default: 5000ms)
+    
     # Active Exchange: binance, mexc, bybit
     ACTIVE_EXCHANGE: str = "mexc"
     
@@ -134,6 +146,38 @@ class Settings(BaseSettings):
     
     # Reconciliation Configuration
     RECONCILIATION_INTERVAL_SECONDS: int = 120  # Run every 2 minutes
+    
+    # =========================================================================
+    # Risk Management Engine Configuration
+    # =========================================================================
+    
+    # Daily loss and drawdown limits
+    RISK_MAX_DAILY_LOSS_PCT: float = 0.03  # 3% daily loss limit
+    RISK_MAX_DRAWDOWN_PCT: float = 0.15  # 15% max drawdown
+    
+    # Position sizing and leverage
+    RISK_MAX_POSITION_SIZE_PCT: float = 0.015  # 1.5% per trade
+    RISK_MAX_LEVERAGE: int = 5
+    
+    # Market condition filters
+    RISK_VOLATILITY_THRESHOLD: float = 0.8  # ATR-based chaos threshold
+    RISK_MAX_SLIPPAGE_PCT: float = 0.002  # 0.2% max slippage
+    
+    # Cooldown and consecutive loss tracking
+    RISK_COOLDOWN_PERIOD_SECONDS: int = 300  # 5 minutes after consecutive losses
+    RISK_MAX_CONSECUTIVE_LOSSES: int = 3
+    
+    # =========================================================================
+    # Circuit Breaker Configuration (Enhanced)
+    # =========================================================================
+    
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5  # Already exists
+    CIRCUIT_BREAKER_RECOVERY_TIMEOUT: int = 60  # Already exists
+    CIRCUIT_BREAKER_SLIPPAGE_THRESHOLD: float = 0.005  # 0.5% slippage triggers breaker
+    CIRCUIT_BREAKER_LATENCY_THRESHOLD_MS: float = 5000  # 5s API latency
+    CIRCUIT_BREAKER_SPREAD_THRESHOLD_PCT: float = 0.005  # 0.5% spread
+    CIRCUIT_BREAKER_SYNC_TOLERANCE_PCT: float = 0.01  # 1% position sync tolerance
+    CIRCUIT_BREAKER_WEBSOCKET_STALE_THRESHOLD: int = 120  # seconds
     
     # =========================================================================
     # Order Execution Engine Configuration (Steps 9-12)
