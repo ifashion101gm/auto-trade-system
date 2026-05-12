@@ -11,7 +11,7 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.storage.models import OrderEvents
+from app.database.models import OrderEvents
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)

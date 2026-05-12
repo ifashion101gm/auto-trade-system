@@ -2,9 +2,12 @@
 MEXC LIVE exchange implementation.
 Uses real API keys and executes actual trades.
 Now uses MexcExecutor for proper position-side handling.
+Wrapped with ExchangeAdapter for circuit breaker and rate limiting.
 """
+import asyncio
 from app.exchange.base_exchange import BaseExchange
 from app.exchange.mexc_executor import MexcExecutor
+from app.exchange.exchange_adapter import ExchangeAdapter
 from app.config import settings
 import logging
 
@@ -16,11 +19,15 @@ class MEXCLiveExchange(BaseExchange):
     MEXC LIVE exchange implementation.
     Uses real API keys and executes actual trades.
     Leverages MexcExecutor for proper MEXC-specific order handling.
+    Wrapped with ExchangeAdapter for reliability features.
     """
     
     def __init__(self):
-        self.executor = MexcExecutor(testnet=False)
+        # Create executor and wrap with adapter for circuit breaker + rate limiting
+        executor = MexcExecutor(testnet=False)
+        self.executor = ExchangeAdapter(executor)
         self._mode = 'LIVE'
+        self._connected = False
     
     async def open_position(self, symbol, side, amount, leverage=1, 
                            stop_loss=None, take_profit=None):
@@ -257,4 +264,77 @@ class MEXCLiveExchange(BaseExchange):
     
     async def close(self):
         """Close exchange connection gracefully."""
-        await self.executor.client.close()
+        await self.executor.close()
+    
+    # =========================================================================
+    # Implement new BaseExchange abstract methods
+    # =========================================================================
+    
+    async def connect(self) -> bool:
+        """Initialize connection and verify exchange health."""
+        try:
+            logger.info("🔌 Connecting to MEXC LIVE exchange...")
+            
+            # Test connectivity with health check
+            health = await self.executor.execute_with_retry(
+                "health_check",
+                self.executor.exchange.health_check
+            )
+            
+            # Verify API credentials by fetching balance
+            balance = await self.get_balance()
+            
+            self._connected = True
+            logger.info(f"✅ MEXC LIVE connected successfully (balance: ${balance.get('total_usdt', 0):.2f})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ MEXC LIVE connection failed: {e}")
+            self._connected = False
+            return False
+    
+    async def sync_state(self) -> dict:
+        """Synchronize full exchange state (positions, orders, balance)."""
+        try:
+            logger.debug("🔄 Syncing MEXC exchange state...")
+            
+            # Fetch all state components concurrently
+            positions_task = self.get_positions()
+            balance_task = self.get_balance()
+            open_orders_task = self.fetch_open_orders()
+            
+            positions, balance, open_orders = await asyncio.gather(
+                positions_task,
+                balance_task,
+                open_orders_task,
+                return_exceptions=True
+            )
+            
+            # Handle exceptions gracefully
+            if isinstance(positions, Exception):
+                logger.warning(f"⚠️  Failed to fetch positions: {positions}")
+                positions = []
+            
+            if isinstance(balance, Exception):
+                logger.warning(f"⚠️  Failed to fetch balance: {balance}")
+                balance = {}
+            
+            if isinstance(open_orders, Exception):
+                logger.warning(f"⚠️  Failed to fetch open orders: {open_orders}")
+                open_orders = []
+            
+            state = {
+                'positions': positions,
+                'balance': balance,
+                'open_orders': open_orders,
+                'timestamp': __import__('datetime').datetime.utcnow().isoformat(),
+                'exchange': 'MEXC',
+                'mode': 'LIVE'
+            }
+            
+            logger.info(f"✅ State synced: {len(positions)} positions, {len(open_orders)} open orders")
+            return state
+            
+        except Exception as e:
+            logger.error(f"❌ State sync failed: {e}")
+            raise

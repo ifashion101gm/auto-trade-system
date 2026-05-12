@@ -5,7 +5,7 @@ Detects and repairs mismatches. Runs every 2 minutes.
 This is a CRITICAL component for maintaining single source of truth.
 """
 from app.exchange.exchange_router import ExchangeRouter
-from app.storage.repository import TradeRepository, PositionRepository
+from app.database.repositories import TradeRepository, PositionRepository
 from app.events.event_bus import event_bus
 from app.events.event_types import (
     SYNC_MISMATCH, SYNC_REPAIRED, 
@@ -177,18 +177,40 @@ class ReconciliationService:
         })
     
     async def _verify_trade_position_consistency(self, mode, db_session):
-        """Verify all open trades have corresponding positions."""
+        """Deep verification of trade-position-order consistency."""
         open_trades = await self.trade_repo.get_open_trades(db_session)
         open_positions = await self.position_repo.get_open_positions(db_session)
+        
+        # Also fetch open orders
+        exchange = self.router.get_exchange(mode)
+        try:
+            open_orders = await exchange.fetch_open_orders()
+            order_symbols = {
+                o.get('symbol') for o in open_orders 
+                if o.get('status') == 'open'
+            }
+        except Exception as e:
+            logger.warning(f"Could not fetch open orders: {e}")
+            order_symbols = set()
         
         trade_symbols = {t.symbol for t in open_trades}
         position_symbols = {p.symbol for p in open_positions}
         
-        # Trades without positions
-        missing_positions = trade_symbols - position_symbols
-        for symbol in missing_positions:
-            logger.warning(f"Trade without position: {symbol}")
-            # This could indicate a partially filled order or sync issue
+        # Detect inconsistencies
+        trades_without_positions = trade_symbols - position_symbols
+        positions_without_trades = position_symbols - trade_symbols
+        orders_without_trades = order_symbols - trade_symbols
+        
+        for symbol in trades_without_positions:
+            logger.warning(f"⚠️  Trade without position: {symbol} - Possible partial fill")
+            # Trigger immediate position sync
+            await self._trigger_emergency_sync(symbol, mode, db_session)
+        
+        for symbol in positions_without_trades:
+            logger.warning(f"⚠️  Position without trade: {symbol} - Orphaned position")
+        
+        for symbol in orders_without_trades:
+            logger.warning(f"⚠️  Order without trade record: {symbol}")
     
     async def _detect_orphaned_orders(self, mode, db_session):
         """
@@ -255,3 +277,27 @@ class ReconciliationService:
         
         except Exception as e:
             logger.error(f"Orphaned order detection in reconciliation failed: {e}")
+    
+    async def _trigger_emergency_sync(self, symbol: str, mode: str, db_session):
+        """Force immediate sync for problematic symbol."""
+        logger.info(f"🔄 Triggering emergency sync for {symbol}")
+        
+        try:
+            exchange = self.router.get_exchange(mode)
+            positions = await exchange.get_positions()
+            
+            # Update database immediately
+            for pos in positions:
+                if pos['symbol'] == symbol:
+                    await self.position_repo.upsert_position({
+                        **pos,
+                        'sync_source': 'emergency_reconciliation'
+                    }, db_session)
+            
+            await event_bus.publish(SYNC_REPAIRED, {
+                'action': 'emergency_sync_triggered',
+                'symbol': symbol,
+                'mode': mode
+            })
+        except Exception as e:
+            logger.error(f"Emergency sync failed for {symbol}: {e}")

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infra.exchange_manager import UnifiedExchangeManager
 from app.events.event_bus import EventBus
 from app.events.event_types import TP_HIT, SL_HIT, POSITION_UPDATED
-from app.storage.models import PaperTrades
+from app.database.models import PaperTrades
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)

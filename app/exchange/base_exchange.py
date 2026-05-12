@@ -19,6 +19,20 @@ class BaseExchange(ABC):
     """
     
     # =========================================================================
+    # Connection & State Management Methods
+    # =========================================================================
+    
+    @abstractmethod
+    async def connect(self) -> bool:
+        """Initialize connection and verify exchange health."""
+        pass
+    
+    @abstractmethod
+    async def sync_state(self) -> Dict[str, Any]:
+        """Synchronize full exchange state (positions, orders, balance)."""
+        pass
+    
+    # =========================================================================
     # Market Data Methods
     # =========================================================================
     

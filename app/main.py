@@ -8,14 +8,14 @@ from datetime import datetime
 from fastapi import FastAPI, Request, Response
 from contextlib import asynccontextmanager
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from app.api import trading, ai, cache, llm
-from app.storage.db import init_db, get_session
+from app.dashboard import trading_router, ai_router, cache_router, llm_router
+from app.database.connection import init_db, get_session
 from app.logging_config import get_logger
-from app.agents.sync_agent import SyncAgent
-from app.services.recovery_service import RecoveryService
+from app.sync.sync_agent import SyncAgent
+from app.recovery.recovery_service import RecoveryService
 from app.services.reconciliation_service import ReconciliationService
-from app.services.position_sync import PositionSyncService
-from app.agents.telegram_agent import TelegramAgent
+from app.sync.position_sync import PositionSyncService
+from app.notifications.telegram_agent import TelegramAgent
 from app.events.event_bus import event_bus
 from app.events.event_store import event_store
 
@@ -156,10 +156,10 @@ async def metrics_middleware(request: Request, call_next):
     return response
 
 # Include routers
-app.include_router(trading.router, prefix="/api/v1", tags=["trading"])
-app.include_router(ai.router, prefix="/api/v1", tags=["ai-orchestration"])
-app.include_router(cache.router, prefix="/api/v1", tags=["cache-management"])
-app.include_router(llm.router, prefix="/api/v1", tags=["llm-optimization"])
+app.include_router(trading_router, prefix="/api/v1", tags=["trading"])
+app.include_router(ai_router, prefix="/api/v1", tags=["ai-orchestration"])
+app.include_router(cache_router, prefix="/api/v1", tags=["cache-management"])
+app.include_router(llm_router, prefix="/api/v1", tags=["llm-optimization"])
 
 @app.get("/health")
 async def health_check():

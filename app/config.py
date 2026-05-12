@@ -108,10 +108,13 @@ class Settings(BaseSettings):
     EVENT_BATCH_INTERVAL_MS: int = 100  # Batch high-frequency events
     
     # WebSocket Configuration
-    WEBSOCKET_HEARTBEAT_INTERVAL: int = 30  # seconds
-    WEBSOCKET_HEARTBEAT_TIMEOUT: int = 45  # seconds
+    WEBSOCKET_HEARTBEAT_INTERVAL: int = 30  # seconds (ping frequency)
+    WEBSOCKET_HEARTBEAT_TIMEOUT: int = 45  # seconds (max time without pong)
     WEBSOCKET_RECONNECT_DELAY: int = 2  # initial delay in seconds
     WEBSOCKET_MAX_RECONNECT_DELAY: int = 60  # max delay in seconds
+    WEBSOCKET_MAX_RECONNECT_ATTEMPTS: int = 0  # 0 = unlimited retries
+    WEBSOCKET_STALE_STREAM_THRESHOLD: int = 120  # seconds without data before forcing reconnect
+    WEBSOCKET_JITTER_FACTOR: float = 0.1  # 10% jitter to prevent thundering herd
     
     # Circuit Breaker Configuration
     CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
@@ -131,6 +134,20 @@ class Settings(BaseSettings):
     
     # Reconciliation Configuration
     RECONCILIATION_INTERVAL_SECONDS: int = 120  # Run every 2 minutes
+    
+    # =========================================================================
+    # Order Execution Engine Configuration (Steps 9-12)
+    # =========================================================================
+    
+    # Order Idempotency & Retry
+    ORDER_IDEMPOTENCY_ENABLED: bool = True
+    ORDER_RETRY_MAX_ATTEMPTS: int = 3
+    ORDER_RETRY_BASE_DELAY: float = 1.0
+    ORDER_RETRY_MAX_DELAY: float = 30.0
+    
+    # Reconciliation
+    POSITION_SYNC_INTERVAL: int = 5  # seconds
+    EMERGENCY_SYNC_ENABLED: bool = True
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),

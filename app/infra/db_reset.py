@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.storage.models import (
+from app.database.models import (
     PaperTrades, TrailEvents, DecisionJournal, 
     StrategyEvaluations, TradeProposals
 )
@@ -243,7 +243,7 @@ async def reset_database_for_testnet(user_id: str = None, archive: bool = True):
         user_id: Optional user filter
         archive: Whether to archive existing data
     """
-    from app.storage.db import async_session_maker
+    from app.database.connection import async_session_maker
     
     resetter = DatabaseResetter()
     

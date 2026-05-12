@@ -496,7 +496,8 @@ class MEXCClient:
         symbol: str,
         side: str,
         amount: float,
-        leverage: int = 1
+        leverage: int = 1,
+        params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Place a market order with safety checks and retry logic.
@@ -506,6 +507,7 @@ class MEXCClient:
             side: 'buy' or 'sell'
             amount: Quantity to trade
             leverage: Leverage multiplier (for futures)
+            params: Additional parameters (e.g., reduceOnly, positionSide)
             
         Returns:
             Order details including ID, status, filled price
@@ -513,7 +515,7 @@ class MEXCClient:
         return await self._execute_with_retry(
             "create_market_order",
             self._create_market_order_impl,
-            symbol, side, amount, leverage
+            symbol, side, amount, leverage, params
         )
     
     async def _create_market_order_impl(
@@ -521,7 +523,8 @@ class MEXCClient:
         symbol: str,
         side: str,
         amount: float,
-        leverage: int = 1
+        leverage: int = 1,
+        params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Internal implementation for creating market order."""
         try:
@@ -555,15 +558,19 @@ class MEXCClient:
             
             # Place market order
             # For MEXC futures, we need to specify it's a swap order
-            params = {}
+            order_params = {}
             if self.market_type == 'futures':
-                params['positionSide'] = 'BOTH'  # One-way position mode
+                order_params['positionSide'] = 'BOTH'  # One-way position mode
+            
+            # Merge user-provided params (e.g., reduceOnly) with defaults
+            if params:
+                order_params.update(params)
             
             order = await self.exchange.create_market_order(
                 normalized_symbol, 
                 side, 
                 amount,
-                params=params
+                params=order_params
             )
             
             return {

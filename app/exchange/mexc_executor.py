@@ -337,11 +337,13 @@ class MexcExecutor:
             
             logger.debug(f"Placing reduce-only order: {side} {amount} {symbol} params={params}")
             
+            # CRITICAL FIX: Pass params to create_market_order
             result = await self.client.create_market_order(
                 symbol=symbol,
                 side=side,
                 amount=amount,
-                leverage=1  # Leverage doesn't matter for closing
+                leverage=1,  # Leverage doesn't matter for closing
+                params=params  # ← FIXED: Now passing reduceOnly flag
             )
             
             return result

@@ -11,7 +11,9 @@ Inspired by Freqtrade's exchange wrapper and Hummingbot's reliability patterns.
 import asyncio
 import time
 import logging
-from typing import Dict, Any, Optional, Callable
+import random
+import uuid
+from typing import Dict, Any, Optional, Callable, List
 from functools import wraps
 from collections import deque
 
@@ -171,6 +173,7 @@ class ExchangeAdapter:
         operation_name: str,
         func: Callable,
         *args,
+        idempotency_key: Optional[str] = None,
         **kwargs
     ) -> Any:
         """
@@ -179,7 +182,9 @@ class ExchangeAdapter:
         Args:
             operation_name: Name of operation for logging
             func: Async function to execute
-            *args, **kwargs: Arguments to pass to func
+            *args: Arguments to pass to func
+            idempotency_key: Optional key for idempotent operations (prevents duplicates)
+            **kwargs: Keyword arguments to pass to func
             
         Returns:
             Result from successful execution
@@ -203,6 +208,17 @@ class ExchangeAdapter:
             start_time = time.time()
             
             try:
+                # Idempotency check: verify order doesn't already exist before retry
+                if idempotency_key and attempt > 1:
+                    try:
+                        # Check if order was actually created despite previous error
+                        existing_order = await self.exchange.fetch_order_by_client_id(idempotency_key)
+                        if existing_order:
+                            logger.info(f"✅ Idempotency check: Order already exists: {idempotency_key}")
+                            return existing_order
+                    except Exception:
+                        pass  # Order doesn't exist, proceed with retry
+                
                 # Execute the operation
                 result = await func(*args, **kwargs)
                 
@@ -234,11 +250,10 @@ class ExchangeAdapter:
                 
                 # Check if we should retry
                 if attempt < self.max_retries:
-                    # Calculate delay with exponential backoff
-                    delay = min(
-                        self.base_delay * (2 ** (attempt - 1)),
-                        self.max_delay
-                    )
+                    # Calculate delay with exponential backoff + jitter
+                    base_delay = self.base_delay * (2 ** (attempt - 1))
+                    jitter = base_delay * 0.1 * random.random()  # 10% jitter
+                    delay = min(base_delay + jitter, self.max_delay)
                     
                     logger.warning(
                         f"⚠️  {operation_name} failed (attempt {attempt}/{self.max_retries}): {e}. "
@@ -271,22 +286,30 @@ class ExchangeAdapter:
         - Insufficient balance
         """
         error_msg = str(error).lower()
+        error_code = getattr(error, 'code', None)
         
-        # Non-retryable errors
+        # Non-retryable: Client errors (4xx)
+        non_retryable_codes = [400, 401, 403, 404, 422]
+        if error_code in non_retryable_codes:
+            return False
+        
+        # Non-retryable keywords
         non_retryable_keywords = [
             'invalid api key',
             'authentication',
             'insufficient balance',
             'invalid parameter',
             'symbol not found',
-            'order not found'
+            'order not found',
+            'insufficient funds',
+            'minimum order size'
         ]
         
         for keyword in non_retryable_keywords:
             if keyword in error_msg:
                 return False
         
-        # Default: assume retryable
+        # Default: assume retryable (network issues, 5xx errors, timeouts)
         return True
     
     def get_metrics(self) -> Dict[str, Any]:
@@ -343,10 +366,19 @@ class ExchangeAdapter:
         amount: float,
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
+        # Generate idempotency key if not provided
+        client_order_id = params.get('clientOrderId') if params else None
+        if not client_order_id:
+            client_order_id = f"ord_{uuid.uuid4().hex[:16]}"
+            if params is None:
+                params = {}
+            params['clientOrderId'] = client_order_id
+        
         return await self.execute_with_retry(
             f"create_market_order({symbol}, {side}, {amount})",
             self.exchange.create_market_order,
-            symbol, side, amount, params
+            symbol, side, amount, params,
+            idempotency_key=client_order_id
         )
     
     async def create_limit_order(
@@ -357,10 +389,19 @@ class ExchangeAdapter:
         price: float,
         params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
+        # Generate idempotency key if not provided
+        client_order_id = params.get('clientOrderId') if params else None
+        if not client_order_id:
+            client_order_id = f"ord_{uuid.uuid4().hex[:16]}"
+            if params is None:
+                params = {}
+            params['clientOrderId'] = client_order_id
+        
         return await self.execute_with_retry(
             f"create_limit_order({symbol}, {side}, {amount}@{price})",
             self.exchange.create_limit_order,
-            symbol, side, amount, price, params
+            symbol, side, amount, price, params,
+            idempotency_key=client_order_id
         )
     
     async def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:

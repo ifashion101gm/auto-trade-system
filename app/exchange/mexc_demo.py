@@ -3,9 +3,12 @@ MEXC DEMO/Paper trading exchange.
 Simulates trades without real money.
 Tracks virtual balance and positions.
 Now uses MexcExecutor for consistent position handling.
+Wrapped with ExchangeAdapter for circuit breaker and rate limiting.
 """
+import asyncio
 from app.exchange.base_exchange import BaseExchange
 from app.exchange.mexc_executor import MexcExecutor
+from app.exchange.exchange_adapter import ExchangeAdapter
 from app.config import settings
 import logging
 import uuid
@@ -29,16 +32,18 @@ class MEXCDemoExchange(BaseExchange):
         self.testnet = testnet
         
         if testnet:
-            # For MEXC testnet, use MexcExecutor with testnet flag
-            self.executor = MexcExecutor(testnet=True)
+            # For MEXC testnet, use MexcExecutor with testnet flag wrapped in adapter
+            executor = MexcExecutor(testnet=True)
+            self.executor = ExchangeAdapter(executor)
             self._use_real_api = True
         else:
-            # Local paper trading simulation
+            # Local paper trading simulation - wrap with adapter for consistency
             self.executor = None
             self._use_real_api = False
         self._mode = 'DEMO'
         self._virtual_balance = 1000.0  # Starting virtual balance (local sim only)
         self._demo_positions = {}  # {order_id: position_data} (local sim only)
+        self._connected = False
     async def open_position(self, symbol, side, amount, leverage=1,
                            stop_loss=None, take_profit=None):
         """Execute order - either on testnet API or local simulation."""
@@ -441,4 +446,90 @@ class MEXCDemoExchange(BaseExchange):
     async def close(self):
         """Close exchange connection gracefully."""
         if self._use_real_api and self.executor:
-            await self.executor.client.close()
+            await self.executor.close()
+    
+    # =========================================================================
+    # Implement new BaseExchange abstract methods
+    # =========================================================================
+    
+    async def connect(self) -> bool:
+        """Initialize connection and verify exchange health."""
+        try:
+            if self._use_real_api:
+                logger.info("🔌 Connecting to MEXC DEMO (testnet)...")
+                
+                # Test connectivity with health check
+                health = await self.executor.execute_with_retry(
+                    "health_check",
+                    self.executor.exchange.health_check
+                )
+                
+                # Verify API credentials by fetching balance
+                balance = await self.get_balance()
+                
+                self._connected = True
+                logger.info(f"✅ MEXC DEMO (testnet) connected successfully")
+                return True
+            else:
+                # Local simulation - always "connected"
+                self._connected = True
+                logger.info("✅ MEXC DEMO (local simulation) ready")
+                return True
+            
+        except Exception as e:
+            logger.error(f"❌ MEXC DEMO connection failed: {e}")
+            self._connected = False
+            return False
+    
+    async def sync_state(self) -> dict:
+        """Synchronize full exchange state (positions, orders, balance)."""
+        try:
+            logger.debug("🔄 Syncing MEXC DEMO exchange state...")
+            
+            if self._use_real_api:
+                # Fetch all state components concurrently from testnet
+                positions_task = self.get_positions()
+                balance_task = self.get_balance()
+                open_orders_task = self.fetch_open_orders()
+                
+                positions, balance, open_orders = await asyncio.gather(
+                    positions_task,
+                    balance_task,
+                    open_orders_task,
+                    return_exceptions=True
+                )
+                
+                # Handle exceptions gracefully
+                if isinstance(positions, Exception):
+                    logger.warning(f"⚠️  Failed to fetch positions: {positions}")
+                    positions = []
+                
+                if isinstance(balance, Exception):
+                    logger.warning(f"⚠️  Failed to fetch balance: {balance}")
+                    balance = {}
+                
+                if isinstance(open_orders, Exception):
+                    logger.warning(f"⚠️  Failed to fetch open orders: {open_orders}")
+                    open_orders = []
+            else:
+                # Local simulation - use virtual state
+                positions = list(self._demo_positions.values())
+                balance = {'total_usdt': self._virtual_balance, 'free_usdt': self._virtual_balance}
+                open_orders = []
+            
+            state = {
+                'positions': positions,
+                'balance': balance,
+                'open_orders': open_orders,
+                'timestamp': datetime.utcnow().isoformat(),
+                'exchange': 'MEXC',
+                'mode': 'DEMO',
+                'testnet': self.testnet
+            }
+            
+            logger.info(f"✅ State synced: {len(positions)} positions, {len(open_orders)} open orders")
+            return state
+            
+        except Exception as e:
+            logger.error(f"❌ State sync failed: {e}")
+            raise
