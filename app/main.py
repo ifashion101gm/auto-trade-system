@@ -3,25 +3,48 @@ Main FastAPI application with multi-agent orchestration.
 Enhanced with execution layer architecture upgrade.
 """
 import asyncio
+import time
 from datetime import datetime
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from contextlib import asynccontextmanager
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from app.api import trading, ai, cache, llm
 from app.storage.db import init_db, get_session
 from app.logging_config import get_logger
 from app.agents.sync_agent import SyncAgent
 from app.services.recovery_service import RecoveryService
 from app.services.reconciliation_service import ReconciliationService
+from app.services.position_sync import PositionSyncService
 from app.agents.telegram_agent import TelegramAgent
 from app.events.event_bus import event_bus
 from app.events.event_store import event_store
 
 logger = get_logger(__name__)
 
+# Prometheus metrics
+REQUEST_COUNT = Counter(
+    'http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status']
+)
+REQUEST_LATENCY = Histogram(
+    'http_request_duration_seconds',
+    'HTTP request latency'
+)
+WEBSOCKET_CONNECTED = Counter(
+    'websocket_connected',
+    'WebSocket connection status (1=connected, 0=disconnected)'
+)
+EVENT_BUS_QUEUE_SIZE = Histogram(
+    'event_bus_queue_size',
+    'Event bus queue size'
+)
+
 # Background services
 sync_agent = SyncAgent()
 recovery_service = RecoveryService()
 reconciliation_service = ReconciliationService()
+position_sync_service = None  # Will be initialized on startup
 telegram_agent = None  # Will be initialized on startup
 
 
@@ -45,11 +68,11 @@ async def lifespan(app: FastAPI):
     # Subscribe to all critical event types
     from app.events.event_types import (
         ORDER_FILLED, ORDER_PARTIALLY_FILLED, ORDER_CANCELLED,
-        POSITION_UPDATED, SYNC_MISMATCH, SYNC_REPAIRED, STATE_CHANGED
+        POSITION_UPDATED, SYNC_MISMATCH, SYNC_REPAIRED
     )
     
     for event_type in [ORDER_FILLED, ORDER_PARTIALLY_FILLED, ORDER_CANCELLED,
-                       POSITION_UPDATED, SYNC_MISMATCH, SYNC_REPAIRED, STATE_CHANGED]:
+                       POSITION_UPDATED, SYNC_MISMATCH, SYNC_REPAIRED]:
         event_bus.subscribe(event_type, persist_critical_events, priority=20)
     
     logger.info("✅ EventStore subscribed to critical events")
@@ -87,11 +110,22 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(reconciliation_loop())
     logger.info("✅ Reconciliation loop started")
     
+    # Start position sync service (every 5 seconds)
+    global position_sync_service
+    position_sync_service = PositionSyncService(testnet=True)  # Use testnet by default
+    asyncio.create_task(position_sync_service.start(get_session))
+    logger.info("✅ Position sync service started (5s interval, testnet mode)")
+    
     yield
     
     # Shutdown
     await event_bus.stop_processing()
     logger.info("🛑 EventBus stopped")
+    
+    if position_sync_service:
+        position_sync_service.stop()
+        await position_sync_service.close()
+        logger.info("🛑 Position sync service stopped")
     
     await sync_agent.stop()
     logger.info("🛑 Shutting down...")
@@ -103,6 +137,23 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan
 )
+
+# Add Prometheus metrics middleware
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """Middleware to track HTTP request metrics for Prometheus."""
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status=response.status_code
+    ).inc()
+    
+    REQUEST_LATENCY.observe(duration)
+    return response
 
 # Include routers
 app.include_router(trading.router, prefix="/api/v1", tags=["trading"])
@@ -123,10 +174,22 @@ async def root():
     }
 
 @app.get("/metrics")
-async def get_system_metrics():
+async def get_system_metrics(request: Request):
     """Get comprehensive system metrics from all components."""
+    # If the request accepts Prometheus format, return that instead
+    accept_header = request.headers.get('accept', '')
+    if 'application/openmetrics-text' in accept_header or 'text/plain' in accept_header:
+        # Return Prometheus format
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    
+    # Otherwise return the existing format
     return {
         "event_bus": event_bus.get_metrics(),
-        "websocket": sync_agent.websocket_manager.get_metrics() if sync_agent else None,
+        "websocket": sync_agent.websocket_manager.get_metrics() if sync_agent and hasattr(sync_agent, 'websocket_manager') else None,
         "timestamp": datetime.utcnow().isoformat()
     }
+
+@app.get("/metrics/prometheus")
+async def get_prometheus_metrics():
+    """Prometheus-compatible metrics endpoint."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

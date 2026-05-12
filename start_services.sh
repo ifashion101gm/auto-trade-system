@@ -27,30 +27,23 @@ source .venv/bin/activate
 
 # Check if PostgreSQL container is running
 echo -e "${YELLOW}🗄️  Checking PostgreSQL...${NC}"
-if docker ps | grep -q postgres-trading; then
+if docker compose ps | grep -q trading-postgres; then
     echo -e "${GREEN}✅ PostgreSQL is running${NC}"
 else
-    echo -e "${YELLOW}⚠️  PostgreSQL not running. Starting...${NC}"
-    docker start postgres-trading 2>/dev/null || \
-    docker run -d --name postgres-trading \
-        -e POSTGRES_USER=trading \
-        -e POSTGRES_PASSWORD=trading123 \
-        -e POSTGRES_DB=vmassit \
-        -p 5432:5432 \
-        -v pgdata:/var/lib/postgresql/data \
-        postgres:13-alpine
-    sleep 3
-    echo -e "${GREEN}✅ PostgreSQL started${NC}"
+    echo -e "${YELLOW}⚠️  PostgreSQL not running. Starting Docker services...${NC}"
+    docker compose up -d postgres redis prometheus grafana
+    sleep 5
+    echo -e "${GREEN}✅ All infrastructure services started${NC}"
 fi
 
 # Check if Redis is running
 echo -e "${YELLOW}💾 Checking Redis...${NC}"
-if redis-cli ping 2>/dev/null | grep -q PONG; then
+if docker exec trading-redis redis-cli ping 2>/dev/null | grep -q PONG; then
     echo -e "${GREEN}✅ Redis is running${NC}"
 else
-    echo -e "${YELLOW}⚠️  Redis not running. Starting...${NC}"
-    redis-server --daemonize yes
-    sleep 1
+    echo -e "${YELLOW}⚠️  Redis not running. Starting via Docker Compose...${NC}"
+    docker compose up -d redis
+    sleep 2
     echo -e "${GREEN}✅ Redis started${NC}"
 fi
 
@@ -100,22 +93,30 @@ echo -e "${GREEN}✅ All services started successfully!${NC}"
 echo "=========================================="
 echo ""
 echo "📊 Service Status:"
-echo "  • PostgreSQL: $(docker ps | grep -q postgres-trading && echo '✅ Running' || echo '❌ Stopped')"
-echo "  • Redis:      $(redis-cli ping 2>/dev/null | grep -q PONG && echo '✅ Running' || echo '❌ Stopped')"
+echo "  • PostgreSQL: $(docker compose ps | grep -q trading-postgres && echo '✅ Running' || echo '❌ Stopped')"
+echo "  • Redis:      $(docker exec trading-redis redis-cli ping 2>/dev/null | grep -q PONG && echo '✅ Running' || echo '❌ Stopped')"
+echo "  • Prometheus: $(curl -s http://localhost:9090/-/healthy > /dev/null 2>&1 && echo '✅ Running' || echo '❌ Stopped')"
+echo "  • Grafana:    $(curl -s http://localhost:3000/api/health > /dev/null 2>&1 && echo '✅ Running' || echo '❌ Stopped')"
 echo "  • App Server: $(curl -s http://localhost:8000/health > /dev/null 2>&1 && echo '✅ Running' || echo '❌ Stopped')"
 echo ""
 echo "🌐 Access Points:"
 echo "  • API Docs:   http://localhost:8000/docs"
 echo "  • Health:     http://localhost:8000/health"
+echo "  • Metrics:    http://localhost:8000/metrics/prometheus"
+echo "  • Prometheus: http://localhost:9090"
+echo "  • Grafana:    http://localhost:3000 (admin/admin123)"
 echo ""
 echo "📝 Useful Commands:"
 echo "  • View logs:       tail -f /tmp/trading_app.log"
 echo "  • Stop app:        pkill -f 'uvicorn app.main:app'"
+echo "  • Docker logs:     docker compose logs -f"
 echo "  • DB console:      PGPASSWORD=trading123 psql -h localhost -U trading -d vmassit"
-echo "  • Redis console:   redis-cli"
+echo "  • Redis console:   docker exec -it trading-redis redis-cli"
+echo "  • Stop services:   docker compose down"
 echo ""
 echo "🎯 Next Steps:"
 echo "  1. Monitor logs for WebSocket connection status"
 echo "  2. Check Telegram for notifications"
 echo "  3. Verify reconciliation runs every 2 minutes"
+echo "  4. Visit Grafana dashboard to monitor system metrics"
 echo ""

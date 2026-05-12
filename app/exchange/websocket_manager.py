@@ -9,7 +9,7 @@ import websockets
 import json
 import asyncio
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from collections import deque
 from app.events.event_bus import event_bus
 from app.events.event_types import (
@@ -74,12 +74,17 @@ class MEXCWebSocketManager:
                 # Resubscribe to all channels
                 await self._resubscribe()
                 
+                # Reset reconnect delay and attempts on successful connection
+                self.reconnect_delay = 2
+                self.reconnect_attempts = 0
+                
                 # Start heartbeat monitoring
                 self._heartbeat_task = asyncio.create_task(self._monitor_heartbeat())
                 
                 # Publish reconnection event
                 await event_bus.publish(WEBSOCKET_RECONNECTED, {
-                    'message': 'WebSocket reconnected successfully'
+                    'message': 'WebSocket reconnected successfully',
+                    'attempt_count': self.reconnect_attempts
                 })
                 
                 # Start listening
@@ -217,12 +222,18 @@ class MEXCWebSocketManager:
     
     async def _handle_reconnect(self):
         """Handle reconnection with exponential backoff."""
-        await event_bus.publish(WEBSOCKET_DISCONNECTED, {
-            'message': 'WebSocket disconnected, attempting reconnect'
-        })
+        # Increment attempt counter
+        self.reconnect_attempts = getattr(self, 'reconnect_attempts', 0) + 1
         
         delay = min(self.reconnect_delay, self.max_reconnect_delay)
-        logger.info(f"🔄 Reconnecting in {delay}s...")
+        
+        await event_bus.publish(WEBSOCKET_DISCONNECTED, {
+            'message': 'WebSocket disconnected, attempting reconnect',
+            'reconnect_delay': delay,
+            'attempt_count': self.reconnect_attempts
+        })
+        
+        logger.info(f"🔄 Reconnecting in {delay}s... (attempt #{self.reconnect_attempts})")
         await asyncio.sleep(delay)
         
         # Exponential backoff

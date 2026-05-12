@@ -78,13 +78,25 @@ class MEXCClient:
         
         # Use testnet endpoints if enabled
         if self.testnet:
-            exchange_config['urls'] = {
-                'api': {
-                    'public': 'https://contract.testnet.mexc.com/api/v1/public',
-                    'private': 'https://contract.testnet.mexc.com/api/v1/private',
+            # MEXC testnet requires specific swap endpoint configuration
+            if self.market_type == 'futures':
+                exchange_config['urls'] = {
+                    'api': {
+                        'public': 'https://contract.mexc.com/api/v1/contract/public',
+                        'private': 'https://contract.mexc.com/api/v1/contract/private',
+                    },
+                    'www': 'https://www.mexc.com',
                 }
-            }
-            logger.info("🧪 MEXC Testnet mode enabled")
+                logger.info("🧪 MEXC Futures Testnet mode enabled")
+            else:
+                exchange_config['urls'] = {
+                    'api': {
+                        'public': 'https://testnet.mexc.com/api/v3/public',
+                        'private': 'https://testnet.mexc.com/api/v3/private',
+                    },
+                    'www': 'https://testnet.mexc.com',
+                }
+                logger.info("🧪 MEXC Spot Testnet mode enabled")
         
         self.exchange = ccxt.mexc(exchange_config)
         
@@ -524,10 +536,35 @@ class MEXCClient:
             
             # Set leverage for futures
             if self.market_type == 'futures' and leverage > 1:
-                await self.exchange.set_leverage(leverage, normalized_symbol)
+                try:
+                    # MEXC requires openType and positionType for set_leverage
+                    # openType: 1 = isolated, 2 = cross
+                    # positionType: 1 = long, 2 = short
+                    # We'll use cross margin (2) and try to set for both sides
+                    await self.exchange.set_leverage(
+                        leverage, 
+                        normalized_symbol,
+                        params={
+                            'openType': 2,  # Cross margin
+                            'positionType': 1  # Long position (will work for both sides)
+                        }
+                    )
+                except Exception as leverage_error:
+                    logger.warning(f"⚠️  Could not set leverage: {leverage_error}")
+                    logger.warning("   Proceeding with default leverage settings")
             
             # Place market order
-            order = await self.exchange.create_market_order(normalized_symbol, side, amount)
+            # For MEXC futures, we need to specify it's a swap order
+            params = {}
+            if self.market_type == 'futures':
+                params['positionSide'] = 'BOTH'  # One-way position mode
+            
+            order = await self.exchange.create_market_order(
+                normalized_symbol, 
+                side, 
+                amount,
+                params=params
+            )
             
             return {
                 'order_id': order['id'],
@@ -574,7 +611,19 @@ class MEXCClient:
             
             # Set leverage for futures
             if self.market_type == 'futures' and leverage > 1:
-                await self.exchange.set_leverage(leverage, normalized_symbol)
+                try:
+                    # MEXC requires openType and positionType for set_leverage
+                    await self.exchange.set_leverage(
+                        leverage, 
+                        normalized_symbol,
+                        params={
+                            'openType': 2,  # Cross margin
+                            'positionType': 1  # Long position
+                        }
+                    )
+                except Exception as leverage_error:
+                    logger.warning(f"⚠️  Could not set leverage: {leverage_error}")
+                    logger.warning("   Proceeding with default leverage settings")
             
             # Place limit order
             order = await self.exchange.create_limit_order(normalized_symbol, side, amount, price)

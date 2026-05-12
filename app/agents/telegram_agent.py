@@ -9,7 +9,7 @@ from app.events.event_bus import event_bus
 from app.events.event_types import (
     ORDER_OPENED, ORDER_CLOSED, ORDER_FILLED, ORDER_REJECTED,
     TP_HIT, SL_HIT, POSITION_UPDATED,
-    SYNC_MISMATCH, API_ERROR, WEBSOCKET_DISCONNECTED,
+    SYNC_MISMATCH, API_ERROR, WEBSOCKET_DISCONNECTED, WEBSOCKET_RECONNECTED,
     DAILY_SUMMARY_READY
 )
 import logging
@@ -23,6 +23,10 @@ class TelegramAgent:
     def __init__(self):
         self.notifier = TelegramNotifier()
         self._setup_subscriptions()
+        
+        # Rate limiting for WebSocket notifications
+        self._last_ws_disconnect_time = 0
+        self._ws_disconnect_cooldown = 300  # 5 minutes cooldown between disconnect notifications
     
     def _setup_subscriptions(self):
         """Subscribe to all relevant events."""
@@ -35,6 +39,7 @@ class TelegramAgent:
         event_bus.subscribe(SYNC_MISMATCH, self._on_sync_mismatch)
         event_bus.subscribe(API_ERROR, self._on_api_error)
         event_bus.subscribe(WEBSOCKET_DISCONNECTED, self._on_websocket_disconnected)
+        event_bus.subscribe(WEBSOCKET_RECONNECTED, self._on_websocket_reconnected)
         event_bus.subscribe(DAILY_SUMMARY_READY, self._on_daily_summary)
     
     async def _on_trade_opened(self, event):
@@ -165,16 +170,59 @@ Timestamp: {event['timestamp']}
         logger.error("📱 Telegram: API error alert sent")
     
     async def _on_websocket_disconnected(self, event):
-        """Handle WebSocket disconnection."""
-        message = f"""
+        """Handle WebSocket disconnection with improved messaging and rate limiting."""
+        import time
+        
+        current_time = time.time()
+        
+        # Check if we're in cooldown period
+        if current_time - self._last_ws_disconnect_time < self._ws_disconnect_cooldown:
+            logger.debug(f"Skipping WebSocket disconnect notification (cooldown active, {int(current_time - self._last_ws_disconnect_time)}s since last)")
+            return
+        
+        # Update last notification time
+        self._last_ws_disconnect_time = current_time
+        
+        payload = event['payload']
+        message = payload.get('message', 'WebSocket disconnected')
+        
+        # Extract additional context if available
+        reconnect_delay = payload.get('reconnect_delay', 'unknown')
+        attempt_count = payload.get('attempt_count', 1)
+        
+        message_text = f"""
 ⚠️ WEBSOCKET DISCONNECTED
 
-{event['payload']['message']}
+{message}
+Reconnect attempt #{attempt_count}
+Next retry in: {reconnect_delay}s
 
-Attempting automatic reconnection...
+System will automatically attempt to reconnect.
         """.strip()
         
-        await self.notifier.send_message(message)
+        await self.notifier.send_message(message_text)
+        logger.warning(f"📱 Telegram: WebSocket disconnection alert sent (attempt #{attempt_count})")
+    
+    async def _on_websocket_reconnected(self, event):
+        """Handle successful WebSocket reconnection."""
+        import time
+        
+        # Reset the disconnect cooldown timer on successful reconnection
+        self._last_ws_disconnect_time = 0
+        
+        payload = event['payload']
+        message = payload.get('message', 'WebSocket reconnected successfully')
+        
+        message_text = f"""
+✅ WEBSOCKET RECONNECTED
+
+{message}
+
+Trading system is back online and monitoring positions.
+        """.strip()
+        
+        await self.notifier.send_message(message_text)
+        logger.info("📱 Telegram: WebSocket reconnection confirmation sent")
     
     async def _on_daily_summary(self, event):
         """Handle daily summary ready event."""

@@ -1,0 +1,47 @@
+groups:
+  - name: trading_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value }} errors per second"
+          
+      - alert: WebSocketDisconnected
+        expr: websocket_connected == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "WebSocket connection lost"
+          description: "WebSocket has been disconnected for more than 1 minute"
+          
+      - alert: DatabaseConnectionPoolExhausted
+        expr: db_pool_available <= 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection pool exhausted"
+          description: "No available database connections in the pool"
+          
+      - alert: HighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API latency detected"
+          description: "95th percentile latency is {{ $value }} seconds"
+          
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis instance is not responding"
