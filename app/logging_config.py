@@ -69,10 +69,12 @@ FILE_FORMAT = (
 )
 
 # Set default values for extra fields to avoid KeyError
-logger.configure(patcher=lambda record: record["extra"].setdefault("session_id", ""))
-logger.configure(patcher=lambda record: record["extra"].setdefault("symbol", ""))
-logger.configure(patcher=lambda record: record["extra"].setdefault("trade_id", ""))
-logger.configure(patcher=lambda record: record["extra"].setdefault("order_id", ""))
+logger.configure(patcher=lambda record: {
+    record["extra"].setdefault("session_id", "-"),
+    record["extra"].setdefault("symbol", "-"),
+    record["extra"].setdefault("trade_id", "-"),
+    record["extra"].setdefault("order_id", "-"),
+})
 
 # ============================================================================
 # JSON Format for Log Aggregation (Loki/Promtail Compatible)
