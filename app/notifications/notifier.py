@@ -25,7 +25,20 @@ class TelegramNotifier:
     - Error alerts
     - Formatted messages with emojis for readability
     - Deduplication for rejection reports
+    
+    Note: Uses singleton pattern to ensure deduplication state is shared
+    across all instances in the application.
     """
+    
+    # Class-level singleton instance and shared deduplication state
+    _instance = None
+    _shared_rejection_cooldowns: Dict[tuple, datetime] = {}
+    
+    def __new__(cls, *args, **kwargs):
+        """Ensure only one instance exists (singleton pattern)."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
     
     def __init__(self, bot_token: Optional[str] = None, chat_id: Optional[str] = None):
         """
@@ -35,18 +48,25 @@ class TelegramNotifier:
             bot_token: Telegram bot token (from BotFather)
             chat_id: Target chat ID for notifications
         """
+        # Only initialize once (singleton pattern)
+        if hasattr(self, '_initialized'):
+            return
+        
         self.bot_token = bot_token or settings.TELEGRAM_BOT_TOKEN
         self.chat_id = chat_id or settings.TELEGRAM_CHAT_ID
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.enabled = bool(self.bot_token and self.chat_id)
         
-        # Deduplication tracking for rejection reports
+        # Use SHARED deduplication tracking for rejection reports
         # Key: (symbol, reason_category, score_range), Value: timestamp of last sent message
-        self._rejection_cooldowns: Dict[tuple, datetime] = {}
+        # This is shared across ALL instances to ensure deduplication works globally
+        self._rejection_cooldowns = self._shared_rejection_cooldowns
         self._rejection_cooldown_seconds = 600  # 10 minutes default cooldown
         
         if not self.enabled:
             print("⚠️  Telegram notifications disabled (missing BOT_TOKEN or CHAT_ID)")
+        
+        self._initialized = True
     
     async def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
         """

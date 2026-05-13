@@ -30,7 +30,7 @@ from app.database.models import PaperTrades
 from app.database.connection import async_session_maker
 from app.notifications.notifier import TelegramNotifier
 from app.infra.exchange_manager import UnifiedExchangeManager
-from app.services.live_trading_service import LiveTradingService
+from app.execution.trading_service import LiveTradingService
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)

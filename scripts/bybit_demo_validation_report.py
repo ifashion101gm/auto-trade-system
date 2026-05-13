@@ -161,9 +161,10 @@ class BybitDemoValidator:
                 return
             
             # Initialize client for demo trading
-            # Bybit demo uses testnet=True with demo API keys
+            # Bybit Demo Trading uses: testnet=False, demo=True (endpoint: api.bybit.com)
             session = HTTP(
-                testnet=True,
+                testnet=False,
+                demo=True,
                 api_key=settings.BYBIT_DEMO_API_KEY,
                 api_secret=settings.BYBIT_DEMO_API_SECRET
             )
@@ -176,8 +177,12 @@ class BybitDemoValidator:
                 usdt_coin = next((c for c in coin_list if c['coin'] == 'USDT'), None)
                 
                 if usdt_coin:
-                    wallet_balance = float(usdt_coin['walletBalance'])
-                    available_balance = float(usdt_coin['availableToWithdraw'])
+                    # Handle empty string values from API
+                    wallet_balance_str = usdt_coin.get('walletBalance', '0')
+                    available_str = usdt_coin.get('availableToWithdraw', '0')
+                    
+                    wallet_balance = float(wallet_balance_str) if wallet_balance_str else 0.0
+                    available_balance = float(available_str) if available_str else 0.0
                     
                     self.api_stats = {
                         'success': True,

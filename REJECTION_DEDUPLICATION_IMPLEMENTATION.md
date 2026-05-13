@@ -3,18 +3,47 @@
 ## Overview
 Implemented a deduplication mechanism for trade rejection reports to prevent spamming identical Telegram notifications within a short timeframe.
 
+**Updated with Singleton Pattern (May 13, 2026):** Fixed critical issue where multiple `TelegramNotifier` instances had separate deduplication state, causing duplicate notifications. Now uses singleton pattern to ensure global shared state.
+
 ## Problem
 The system was sending duplicate rejection notifications for trades with identical characteristics (same symbol, quality score, and reason) within seconds of each other.
 
-**Example:**
-- `[5/13/2026 1:02 AM]` - Symbol: PAXG/USDT, Score: 75/100, Reason: Quality score below threshold
-- `[5/13/2026 1:03 AM]` - Symbol: PAXG/USDT, Score: 75/100, Reason: Quality score below threshold (~13 seconds later)
+### Root Cause Analysis
+The deduplication logic existed but wasn't working because:
+1. **Multiple Independent Instances**: Different parts of the code created NEW `TelegramNotifier()` instances
+2. **No Shared State**: Each instance had its own `_rejection_cooldowns` dictionary
+3. **Deduplication Only Worked Within Same Instance**: Cooldown tracking failed when different code paths used different notifier instances
+
+**Example of the bug:**
+- `[5/13/2026 7:29 PM]` - Symbol: XAU/USDT:USDT, Score: 65/100, Reason: Quality score below threshold at 12:59:01 UTC
+- `[5/13/2026 7:29 PM]` - Symbol: XAU/USDT:USDT, Score: 65/100, Reason: Quality score below threshold at 12:59:02 UTC (1 second later!)
+
+Both notifications were sent because `trading_service.py` created a new notifier instance that didn't share cooldown state with the script's notifier.
 
 ## Solution
 
-### 1. Core Implementation (`app/notifications/notifier.py`)
+### 1. Singleton Pattern Implementation (`app/notifications/notifier.py`)
 
-Added deduplication logic to the `TelegramNotifier` class:
+Added singleton pattern to ensure all `TelegramNotifier` instances share the same deduplication state:
+
+#### Class-Level Shared State
+```python
+class TelegramNotifier:
+    # Class-level singleton instance and shared deduplication state
+    _instance = None
+    _shared_rejection_cooldowns: Dict[tuple, datetime] = {}
+    
+    def __new__(cls, *args, **kwargs):
+        """Ensure only one instance exists (singleton pattern)."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+```
+
+#### Modified `__init__` Method
+- Added `_initialized` flag to prevent re-initialization
+- Changed instance-level `_rejection_cooldowns` to reference class-level `_shared_rejection_cooldowns`
+- Ensures all instances point to the same dictionary
 
 #### New Attributes
 - `_rejection_cooldowns`: Dictionary tracking recent rejections by key `(symbol, reason_category, score_range)`
@@ -51,52 +80,37 @@ Added deduplication logic to the `TelegramNotifier` class:
 - Only records successful sends for tracking
 - Returns `False` if suppressed by cooldown
 
-### 2. Script Updates
+### 2. Fixed Trading Service Integration (`app/execution/trading_service.py`)
 
-Fixed incorrect imports and updated to use deduplication-aware method:
-
-#### Fixed Imports (from `app.infra.telegram_notifier` → `app.notifications.notifier`)
-- `scripts/cleanup_and_restart_mexc_cycle.py`
-- `scripts/close_mexc_position_and_restart.py`
-- `scripts/execute_complete_gold_cycle.py`
-- `scripts/execute_gold_trade.py`
-- `scripts/validate_complete_system.py`
-- `scripts/test_trade_validation.py`
-- `scripts/validate_paper_trading.py`
-- `scripts/validate_production_readiness.py`
-- `scripts/monitor_deployment.py`
-- `scripts/validate_gold_futures_e2e.py`
-- `app/dashboard/trading_api.py`
-
-#### Updated Rejection Handling
-**`scripts/cleanup_and_restart_mexc_cycle.py`**
-- Changed from direct `send_message()` call to `send_trade_rejection_report()`
-- Now benefits from automatic deduplication
-- Logs whether report was sent or suppressed
+Changed from creating new notifier instance to using existing shared instance:
 
 ```python
-# Before: Manual message construction and sending
-message = f"{emoji} <b>Trade Proposal REJECTED...</b>"
-await self.notifier.send_message(message)
+# Before: Created new instance (no shared state)
+from app.notifications.notifier import TelegramNotifier
+notifier = TelegramNotifier()
+await notifier.send_trade_rejection_report(...)
 
-# After: Use deduplication-aware method
-sent = await self.notifier.send_trade_rejection_report(
-    symbol=settings.GOLD_SYMBOL_MEXC,
-    reason=reason,
-    quality_score=quality_score,
-    cycle_time_ms=cycle_time
-)
-if sent:
-    logger.info("✅ Sent quality filter rejection report")
-else:
-    logger.info("⚠️  Rejection report suppressed (deduplication cooldown)")
+# After: Use existing instance (singleton ensures shared state)
+await self.notifier.send_trade_rejection_report(...)
 ```
 
-### 3. Trading Service Integration
+This ensures the trading service's rejection reports benefit from the same deduplication state as scripts and other components.
 
-**`app/execution/trading_service.py`**
-- Already using `send_trade_rejection_report()` method
-- Automatically benefits from deduplication (no code changes needed)
+### 3. Script Compatibility
+
+All existing scripts automatically benefit from the singleton pattern without code changes:
+- `scripts/cleanup_and_restart_mexc_cycle.py`
+- `scripts/cleanup_and_restart_bybit_demo_cycle.py`
+- `scripts/close_mexc_position_and_restart.py`
+- `scripts/close_manual_position_and_restart.py`
+- And all other scripts using `TelegramNotifier()`
+
+Since they all now get the same singleton instance, deduplication works globally across the entire application.
+
+### 4. Trading Service Integration
+
+Already using `send_trade_rejection_report()` method with the shared notifier instance (fixed in this update).
+Automatically benefits from global deduplication.
 
 ## Behavior
 
@@ -146,19 +160,24 @@ Reports with **ALL** of the following matching within 10 minutes:
 
 ## Testing
 
-Created test script: `test_rejection_dedup.py`
+Created comprehensive test suite: `test_notifier_singleton.py`
 
 Tests verify:
-1. ✅ Reason categorization accuracy
-2. ✅ Score range grouping correctness
+1. ✅ Singleton pattern (all instances are the same object)
+2. ✅ Shared deduplication state across instances
 3. ✅ Cooldown logic (blocks duplicates, allows differences)
 4. ✅ Cooldown expiration (allows after timeout)
-5. ✅ Memory cleanup (removes old entries)
+5. ✅ Reason categorization accuracy
+6. ✅ Score range grouping correctness
+7. ✅ Memory cleanup (removes old entries)
 
 Run tests:
 ```bash
-python test_rejection_dedup.py
+source .venv/bin/activate
+python test_notifier_singleton.py
 ```
+
+**Test Results:** All 7 tests passed ✅
 
 ## Configuration
 
@@ -190,19 +209,19 @@ Recommended values:
 
 ## Files Modified
 
-1. `app/notifications/notifier.py` - Core deduplication logic
-2. `scripts/cleanup_and_restart_mexc_cycle.py` - Import fix + method update
-3. Multiple scripts - Import path corrections (11 files total)
-4. `test_rejection_dedup.py` - Test suite (new file)
+1. `app/notifications/notifier.py` - Added singleton pattern with shared deduplication state
+2. `app/execution/trading_service.py` - Fixed to use existing notifier instance instead of creating new one
+3. `test_notifier_singleton.py` - Comprehensive test suite for singleton and deduplication (new file)
 
 ## Verification Checklist
 
 - [x] Analyzed notification logic in notifier.py
-- [x] Identified all rejection report triggers
-- [x] Implemented deduplication with cooldown
+- [x] Identified root cause: multiple independent notifier instances
+- [x] Implemented singleton pattern for global shared state
+- [x] Fixed trading_service.py to use shared instance
+- [x] Verified all scripts automatically benefit from singleton
 - [x] Ensures different reasons/scores still get through
-- [x] Applied to cleanup scripts
-- [x] Applied to main trading loop
-- [x] Fixed broken imports across codebase
-- [x] Created comprehensive test suite
+- [x] Created comprehensive test suite (7 tests)
+- [x] All tests pass successfully
 - [x] Documented behavior and configuration
+- [x] Verified fix resolves duplicate notification issue

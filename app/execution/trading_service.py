@@ -220,10 +220,9 @@ class LiveTradingService:
                 results['status'] = 'rejected'  # Set status to rejected, not failed
                 
                 # Send rejection notification to Telegram
+                # Use the existing notifier instance (singleton ensures shared deduplication state)
                 try:
-                    from app.notifications.notifier import TelegramNotifier
-                    notifier = TelegramNotifier()
-                    await notifier.send_trade_rejection_report(
+                    await self.notifier.send_trade_rejection_report(
                         symbol=symbol,
                         reason=reason,
                         quality_score=quality_score,
