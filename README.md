@@ -2,6 +2,8 @@
 
 Production-ready database management, backup systems, and data portability infrastructure for automated trading systems.
 
+**Python Version**: 3.11+ required
+
 ## 🎯 Overview
 
 This repository contains enterprise-grade infrastructure components for automated trading systems, providing robust data management, disaster recovery, and monitoring capabilities. The system is built using a "Zone" architecture to ensure scalability, security, and cost-efficiency.
@@ -61,7 +63,9 @@ This repository contains enterprise-grade infrastructure components for automate
 # Clone and setup
 git clone <your-repo-url>
 cd auto-trade-system
-python -m venv .venv
+
+# Ensure Python 3.11+ is installed (available via Linuxbrew at /home/linuxbrew/.linuxbrew/bin/python3.11)
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
@@ -101,6 +105,7 @@ This section provides direct links to official documentation for all core techno
 #### 1. Python Async Programming
 The system leverages Python's `asyncio` library for high-performance, non-blocking I/O operations essential for real-time trading.
 
+- **Python Version**: 3.11+ required (currently using Python 3.11.15)
 - **Official Documentation**: [Python asyncio](https://docs.python.org/3/library/asyncio.html)
 - **Key Concepts**: Event loops, coroutines, async/await syntax, concurrent tasks
 - **Used In**: Database operations, API calls, WebSocket connections, exchange communications

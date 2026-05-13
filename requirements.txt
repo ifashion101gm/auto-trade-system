@@ -1,3 +1,6 @@
+# Python 3.11+ required
+# Install with: pip install -r requirements.txt
+
 aiosqlite==0.22.1
 alembic==1.18.4
 annotated-doc==0.0.4
@@ -60,6 +63,5 @@ uritemplate==4.2.0
 urllib3==2.7.0
 uvicorn==0.46.0
 ccxt==4.5.18
-ccxt-pro>=1.0.0
 websockets>=12.0
 prometheus-client>=0.19.0

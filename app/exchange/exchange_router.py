@@ -18,7 +18,8 @@ class ExchangeRouter:
     
     def __init__(self):
         # Use Bybit Demo Trading for both live and demo modes
-        # Both will use api-demo.bybit.com with demo API keys
+        # Both will use api-demo.bybit.com with demo API keys via Pybit SDK
+        # This ensures proper routing to demo environment bypassing CCXT limitations
         self.live_exchange = BybitConnector(demo_trading=True)
         self.demo_exchange = BybitConnector(demo_trading=True)
     

@@ -62,14 +62,14 @@ class PybitDemoClient:
             demo=True,      # Enable demo trading mode
             api_key=self.api_key,
             api_secret=self.api_secret,
-            recv_window=5000,  # Timestamp validation window (ms)
+            recv_window=settings.BYBIT_RECV_WINDOW,  # Use configurable recv_window
         )
         
         logger.info("✅ PybitDemoClient initialized")
         logger.info(f"   Mode: DEMO TRADING")
         logger.info(f"   Endpoint: https://api-demo.bybit.com")
         logger.info(f"   Category: linear (perpetual swaps)")
-        logger.info(f"   Recv Window: 5000ms")
+        logger.info(f"   Recv Window: {settings.BYBIT_RECV_WINDOW}ms")
     
     async def fetch_balance(self) -> Dict[str, Any]:
         """

@@ -1,0 +1,18 @@
+[project]
+name = "auto-trade-system"
+version = "2.0.0"
+requires-python = ">=3.11,<3.13"
+description = "Production-ready automated trading system with multi-agent architecture"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Auto Trade System Team"}
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]

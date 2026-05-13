@@ -60,6 +60,12 @@ class BybitConnector(BaseExchange):
         if not api_key or not api_secret:
             raise ValueError("Bybit API credentials not configured")
         
+        # Log masked credentials for security (Bybit skill requirement)
+        logger.info(f"🔑 Bybit API Key: {BybitClient.mask_api_key(api_key)}")
+        
+        # Initialize mode before adapter (adapter needs to access self.mode)
+        self._mode = 'DEMO' if self.demo_trading else 'LIVE'
+        
         # Initialize underlying BybitClient
         self.client = BybitClient(
             api_key=api_key,
@@ -85,7 +91,6 @@ class BybitConnector(BaseExchange):
         
         # Connection state
         self._connected = False
-        self._mode = 'DEMO' if self.demo_trading else 'LIVE'
     
     # =========================================================================
     # Connection & State Management Methods
@@ -345,6 +350,46 @@ class BybitConnector(BaseExchange):
         except Exception as e:
             error_info = self.handle_api_error(e)
             logger.error(f"❌ Set leverage failed: {error_info['message']}")
+            raise
+    
+    async def fetch_order_history(
+        self,
+        symbol: str,
+        since: Optional[int] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch historical orders from Bybit."""
+        try:
+            # Use CCXT's fetch_orders method which returns closed and canceled orders
+            params = {}
+            if since:
+                params['since'] = since
+            if limit:
+                params['limit'] = limit
+            
+            orders = await self.adapter.execute_with_retry(
+                f"fetch_order_history({symbol})",
+                self.client.fetch_orders,
+                symbol,
+                params=params
+            )
+            return orders or []
+        except Exception as e:
+            error_info = self.handle_api_error(e)
+            logger.error(f"❌ Fetch order history failed: {error_info['message']}")
+            raise
+    
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        """Get all open positions from Bybit."""
+        try:
+            positions = await self.adapter.execute_with_retry(
+                "get_positions",
+                self.client.fetch_positions
+            )
+            return positions or []
+        except Exception as e:
+            error_info = self.handle_api_error(e)
+            logger.error(f"❌ Get positions failed: {error_info['message']}")
             raise
     
     # =========================================================================
