@@ -1,12 +1,21 @@
-# Auto Trade System - Infrastructure Components
+# Auto Trade System - Self-Healing Trading Infrastructure
 
-Production-ready database management, backup systems, and data portability infrastructure for automated trading systems.
+Production-ready, self-healing automated trading system with AI-powered decision making, multi-exchange support, and resilient closed-loop architecture.
 
-**Python Version**: 3.11+ required
+**Python Version**: 3.11+ required  
+**Status**: ✅ Production Ready (v2.0.0 - Self-Healing Edition)
 
 ## 🎯 Overview
 
-This repository contains enterprise-grade infrastructure components for automated trading systems, providing robust data management, disaster recovery, and monitoring capabilities. The system is built using a "Zone" architecture to ensure scalability, security, and cost-efficiency.
+This repository contains a **self-healing automated trading infrastructure** capable of 24/7 autonomous operation with minimal human oversight. The system features a resilient closed-loop lifecycle (Signal → Execution → Verification → Monitoring → Recovery → Reconciliation) with automatic failure detection and repair.
+
+### Key Capabilities
+- 🤖 **6 Specialized AI Agents** with isolated responsibilities
+- 🛡️ **Duplicate Order Protection** preventing double execution
+- 🔍 **AI Anomaly Detection** identifying unusual patterns
+- ♻️ **Automatic Recovery** from runtime failures
+- 📊 **Continuous Reconciliation** ensuring data integrity
+- 🌐 **Multi-Exchange Support** (MEXC, Binance, Bybit)
 
 ## ✨ Features
 
@@ -56,6 +65,16 @@ This repository contains enterprise-grade infrastructure components for automate
 - **Reconciliation Monitoring**: Automated mismatch detection and repair alerts
 - **Advanced Query Tools**: Pre-built scripts for risk, recovery, and execution analysis
 - **Event Store Integration**: Complete audit trail for all critical operations
+
+### 9. Self-Healing Architecture (v2.0 - LATEST)
+- **6 Specialized Agents**: Signal, Execution, Verification, Monitoring, Recovery, Reconciliation
+- **Closed-Loop Lifecycle**: Signal → Execution → Verification → Monitoring → Recovery → Reconciliation
+- **Duplicate Order Protection**: SHA256 signal hashing prevents double execution
+- **AI Anomaly Detection**: Statistical analysis of latency, failures, slippage, overtrading
+- **Automatic Recovery**: Circuit breaker cooldown, API reconnection, state reset
+- **Continuous Reconciliation**: Exchange-DB sync every 60 seconds with auto-repair
+- **Zero Manual Intervention**: Transient errors handled automatically
+- **Full Audit Trail**: All state transitions and recovery actions logged
 
 ## 🚀 Quick Start
 
@@ -210,6 +229,12 @@ Docker Compose orchestrates the entire infrastructure stack including databases,
 - **pytest**: Standard Python testing framework
 - **Test Scripts**: Located in `scripts/validate_*.py`
 - **Integration Tests**: End-to-end trading cycle validation
+- **Self-Healing Tests**: 27 tests covering agents, dedup, and anomaly detection
+  ```bash
+  # Run all self-healing tests
+  .venv/bin/python -m pytest tests/integration/test_self_healing_agents.py \
+                               tests/integration/test_advanced_self_healing.py -v
+  ```
 
 #### Code Quality
 - **Type Hints**: Full type annotation using Python typing module
@@ -218,7 +243,10 @@ Docker Compose orchestrates the entire infrastructure stack including databases,
 
 ## 📖 Documentation
 
-- **Migrations:** `migrations/README.md`
+### Core Documentation
+- **Self-Healing Architecture**: [docs/SELF_HEALING_ARCHITECTURE.md](docs/SELF_HEALING_ARCHITECTURE.md) - Complete guide to agent-based architecture
+- **Implementation Summary**: [SELF_HEALING_IMPLEMENTATION_SUMMARY.md](SELF_HEALING_IMPLEMENTATION_SUMMARY.md) - What was built and how
+- **Migrations**: [migrations/README.md](migrations/README.md)
 - **Backups:** `scripts/BACKUP_RESTORE_README.md`
 - **Optimization Plan:** `OPTIMIZATION_COMPLETE.md`
 - **API Docs:** Available at `/docs` when running FastAPI server

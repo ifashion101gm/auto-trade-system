@@ -21,7 +21,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.ai.optimized_agents import (
+from app.ai_agents.optimized_agents import (
     OptimizedAgentRouter,
     DeterministicRiskManager,
     CodeBasedExecutionEngine,

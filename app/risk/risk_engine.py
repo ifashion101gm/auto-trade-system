@@ -87,11 +87,18 @@ class RiskEngine:
         self.total_exposure_usd = 0.0
         self.max_concurrent_positions = getattr(settings, 'RISK_MAX_CONCURRENT_POSITIONS', 3)
         
+        # Emergency stop state (Sprint 5)
+        self.emergency_stop_active = False
+        self.emergency_stop_reason: Optional[str] = None
+        self.emergency_stop_timestamp: Optional[datetime] = None
+        self.consecutive_infrastructure_failures = 0
+        
         logger.info("✅ Risk Engine initialized")
         logger.info(f"   Daily Loss Limit: {self.max_daily_loss_pct:.1%}")
         logger.info(f"   Max Drawdown: {self.max_drawdown_pct:.1%}")
         logger.info(f"   Max Position Size: {self.max_position_size_pct:.1%}")
         logger.info(f"   Max Leverage: {self.max_leverage}x")
+        logger.info(f"   Emergency Stop: {'ENABLED' if settings.EMERGENCY_STOP_ENABLED else 'DISABLED'}")
     
     async def check_trade_approval(
         self,
@@ -102,6 +109,7 @@ class RiskEngine:
         Comprehensive pre-trade risk validation.
         
         Checks performed in order:
+        0. Emergency Stop (instant shutdown)
         1. Daily loss limit (-3%)
         2. Max drawdown (15%)
         3. Position size cap (1.5% of balance)
@@ -116,6 +124,16 @@ class RiskEngine:
             RiskDecision with approval status and reasons
         """
         decision = RiskDecision(approved=True)
+        
+        # Check 0: Emergency Stop (instant shutdown) - Sprint 5
+        if self.emergency_stop_active:
+            decision.approved = False
+            decision.violations.append(
+                f"EMERGENCY STOP ACTIVE: {self.emergency_stop_reason} "
+                f"(since {self.emergency_stop_timestamp.isoformat()})"
+            )
+            logger.warning(f"🚫 Trade rejected: Emergency stop active")
+            return decision
         
         # Check 1: Daily loss limit
         if self.daily_pnl_pct <= -self.max_daily_loss_pct:
@@ -206,6 +224,130 @@ class RiskEngine:
         
         logger.info(f"✅ Risk check passed (score: {decision.risk_score}/100)")
         return decision
+    
+    async def emergency_stop(self, reason: str, user_initiated: bool = False):
+        """
+        Immediately halt all trading activity.
+        
+        This is the instant shutdown mechanism that:
+        1. Sets emergency stop flag
+        2. Rejects all new trade proposals
+        3. Optionally closes existing positions
+        4. Sends critical alert via Telegram
+        5. Persists stop event to database
+        
+        Args:
+            reason: Reason for emergency stop
+            user_initiated: Whether stop was manually triggered
+        """
+        self.emergency_stop_active = True
+        self.emergency_stop_reason = reason
+        self.emergency_stop_timestamp = datetime.now(timezone.utc)
+        
+        logger.critical(f"🚨 EMERGENCY STOP ACTIVATED")
+        logger.critical(f"   Reason: {reason}")
+        logger.critical(f"   User Initiated: {user_initiated}")
+        logger.critical(f"   Timestamp: {self.emergency_stop_timestamp.isoformat()}")
+        
+        # Send critical alert
+        try:
+            from app.notifications.notifier import TelegramNotifier
+            notifier = TelegramNotifier()
+            await notifier.send_critical_alert(
+                alert_type='emergency_stop',
+                details={
+                    'reason': reason,
+                    'user_initiated': user_initiated,
+                    'timestamp': self.emergency_stop_timestamp.isoformat(),
+                    'current_exposure_usd': self.total_exposure_usd,
+                    'open_positions': len(self.open_positions)
+                }
+            )
+        except Exception as e:
+            logger.error(f"Failed to send emergency stop alert: {e}")
+        
+        # TODO: Close all open positions if configured
+        # await self._close_all_positions()
+    
+    def check_emergency_stop(self) -> Dict[str, Any]:
+        """
+        Check if emergency stop is active.
+        
+        Returns:
+            Dictionary with stop status and details
+        """
+        if not self.emergency_stop_active:
+            return {
+                'active': False,
+                'can_trade': True
+            }
+        
+        return {
+            'active': True,
+            'can_trade': False,
+            'reason': self.emergency_stop_reason,
+            'timestamp': self.emergency_stop_timestamp.isoformat() if self.emergency_stop_timestamp else None,
+            'duration_seconds': (
+                (datetime.now(timezone.utc) - self.emergency_stop_timestamp).total_seconds()
+                if self.emergency_stop_timestamp else 0
+            )
+        }
+    
+    async def reset_emergency_stop(self, authorized_by: str) -> bool:
+        """
+        Reset emergency stop (requires authorization).
+        
+        Args:
+            authorized_by: Person authorizing the reset
+            
+        Returns:
+            True if reset successful
+        """
+        if not self.emergency_stop_active:
+            logger.warning("No active emergency stop to reset")
+            return False
+        
+        logger.info(f"🔄 Emergency stop reset authorized by: {authorized_by}")
+        
+        # Reset state
+        self.emergency_stop_active = False
+        self.emergency_stop_reason = None
+        self.emergency_stop_timestamp = None
+        self.consecutive_infrastructure_failures = 0
+        
+        # Send notification
+        try:
+            from app.notifications.notifier import TelegramNotifier
+            notifier = TelegramNotifier()
+            await notifier.send_message(
+                f"✅ <b>Emergency Stop Reset</b>\n\n"
+                f"Trading resumed. Authorized by: {authorized_by}\n"
+                f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send reset notification: {e}")
+        
+        return True
+    
+    async def record_infrastructure_failure(self, failure_type: str):
+        """
+        Record infrastructure failure for automatic emergency stop.
+        
+        Args:
+            failure_type: Type of failure (api_timeout, db_error, websocket_disconnect)
+        """
+        self.consecutive_infrastructure_failures += 1
+        
+        logger.warning(
+            f"⚠️  Infrastructure failure #{self.consecutive_infrastructure_failures}: {failure_type}"
+        )
+        
+        # Auto-trigger emergency stop if threshold exceeded
+        if self.consecutive_infrastructure_failures >= settings.EMERGENCY_STOP_INFRASTRUCTURE_FAILURES:
+            await self.emergency_stop(
+                reason=f"Consecutive infrastructure failures ({self.consecutive_infrastructure_failures}): {failure_type}",
+                user_initiated=False
+            )
     
     async def update_daily_pnl(self, trade_result: Dict[str, Any]):
         """

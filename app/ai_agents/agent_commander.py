@@ -29,7 +29,7 @@ import time
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
-from app.ai.optimized_agents import (
+from app.ai_agents.optimized_agents import (
     OptimizedAgentRouter,
     DeterministicRiskManager,
     CodeBasedExecutionEngine,

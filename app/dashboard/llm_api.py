@@ -3,15 +3,15 @@ LLM optimization API endpoints for cost tracking and model routing.
 Zone B: Complete LLM cost control implementation.
 """
 from fastapi import APIRouter, HTTPException, Depends
-from app.llm.spend_tracker import LLMSpendTracker
+from app.llm.spend_tracker import SpendTracker
 from app.llm.provider_pool import LLMProviderPool
 from app.config import settings
 
 router = APIRouter()
 
-def get_spend_tracker() -> LLMSpendTracker:
+def get_spend_tracker() -> SpendTracker:
     """Dependency for getting the spend tracker instance."""
-    return LLMSpendTracker(daily_budget_usd=2.0)
+    return SpendTracker(daily_limit=2.0)
 
 def get_provider_pool() -> LLMProviderPool:
     """Dependency for getting the provider pool instance."""
@@ -19,7 +19,7 @@ def get_provider_pool() -> LLMProviderPool:
 
 
 @router.get("/llm/usage")
-async def get_llm_usage(spend_tracker: LLMSpendTracker = Depends(get_spend_tracker)):
+async def get_llm_usage(spend_tracker: SpendTracker = Depends(get_spend_tracker)):
     """
     Get current LLM usage and spend summary.
     
@@ -33,7 +33,7 @@ async def record_llm_spend(
     model_tier: str,
     cost_usd: float,
     tokens: int = 0,
-    spend_tracker: LLMSpendTracker = Depends(get_spend_tracker)
+    spend_tracker: SpendTracker = Depends(get_spend_tracker)
 ):
     """
     Record LLM API spend.
@@ -58,7 +58,7 @@ async def record_llm_spend(
 
 
 @router.post("/llm/reset-spend")
-async def reset_spend_counter(spend_tracker: LLMSpendTracker = Depends(get_spend_tracker)):
+async def reset_spend_counter(spend_tracker: SpendTracker = Depends(get_spend_tracker)):
     """
     Reset daily spend counter (admin operation).
     
@@ -69,7 +69,7 @@ async def reset_spend_counter(spend_tracker: LLMSpendTracker = Depends(get_spend
 
 
 @router.get("/llm/budget-status")
-async def get_budget_status(spend_tracker: LLMSpendTracker = Depends(get_spend_tracker)):
+async def get_budget_status(spend_tracker: SpendTracker = Depends(get_spend_tracker)):
     """Get current budget status."""
     total = await spend_tracker.get_total_today_spend()
     remaining = await spend_tracker.get_budget_remaining()
@@ -85,7 +85,7 @@ async def get_budget_status(spend_tracker: LLMSpendTracker = Depends(get_spend_t
 
 
 @router.post("/llm/set-budget")
-async def set_daily_budget(budget_usd: float, spend_tracker: LLMSpendTracker = Depends(get_spend_tracker)):
+async def set_daily_budget(budget_usd: float, spend_tracker: SpendTracker = Depends(get_spend_tracker)):
     """
     Set daily budget limit.
     
@@ -131,7 +131,7 @@ async def test_llm_call(provider: str = "openai", provider_pool: LLMProviderPool
 
 
 @router.get("/llm/cost-analysis")
-async def get_cost_analysis(spend_tracker: LLMSpendTracker = Depends(get_spend_tracker)):
+async def get_cost_analysis(spend_tracker: SpendTracker = Depends(get_spend_tracker)):
     """
     Get detailed cost analysis by model tier.
     

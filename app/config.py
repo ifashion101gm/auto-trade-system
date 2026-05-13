@@ -109,6 +109,47 @@ class Settings(BaseSettings):
     AGGRESSIVE_CONFIDENCE_THRESHOLD: float = 0.65
     AGGRESSIVE_SCALING_ENTRIES: bool = True
     
+    # =========================================================================
+    # Sprint 5: Micro-Live Trading Parameters (Controlled Capital Deployment)
+    # =========================================================================
+    
+    # Micro-Live Mode Settings (Phase 1: Initial Live Testing)
+    MICRO_LIVE_ENABLED: bool = False  # Set to True when ready for micro-live
+    MICRO_LIVE_MAX_LEVERAGE: int = 3  # Conservative leverage cap
+    MICRO_LIVE_RISK_PER_TRADE: float = 0.005  # 0.5% per trade
+    MICRO_LIVE_DAILY_LOSS_LIMIT: float = 0.01  # 1% daily loss limit
+    MICRO_LIVE_MAX_POSITION_USD: float = 20.0  # $20 max position size
+    MICRO_LIVE_MAX_CONCURRENT_POSITIONS: int = 2  # Max 2 open positions
+    MICRO_LIVE_MIN_CONFIDENCE_THRESHOLD: float = 0.75  # Higher confidence required
+    
+    # Scale-Up Phases Configuration
+    SCALE_UP_PHASE_1_CAPITAL_USD: float = 100.0  # Micro-Live starting capital
+    SCALE_UP_PHASE_2_CAPITAL_USD: float = 500.0  # 50% scale (after validation)
+    SCALE_UP_FULL_DEPLOYMENT_CAPITAL_USD: float = 1000.0  # Full deployment
+    
+    # Phase Transition Criteria
+    PHASE_TRANSITION_MIN_TRADES: int = 50  # Minimum trades before phase-up
+    PHASE_TRANSITION_MIN_WIN_RATE: float = 0.55  # 55% win rate required
+    PHASE_TRANSITION_MAX_DRAWDOWN: float = 0.05  # Max 5% drawdown allowed
+    PHASE_TRANSITION_MIN_PROFIT_FACTOR: float = 1.5  # Profit factor requirement
+    PHASE_TRANSITION_VALIDATION_DAYS: int = 7  # Minimum days in current phase
+    
+    # Emergency Stop Configuration
+    EMERGENCY_STOP_ENABLED: bool = True
+    EMERGENCY_STOP_DAILY_LOSS_PCT: float = 0.02  # Auto-stop at -2%
+    EMERGENCY_STOP_MAX_SLIPPAGE_PCT: float = 0.01  # Auto-stop if slippage >1%
+    EMERGENCY_STOP_INFRASTRUCTURE_FAILURES: int = 3  # Consecutive failures trigger stop
+    
+    # Alert Thresholds
+    ALERT_DAILY_LOSS_WARNING_PCT: float = -0.02  # Warn at -2%
+    ALERT_DAILY_LOSS_CRITICAL_PCT: float = -0.03  # Critical at -3%
+    ALERT_SLIPPAGE_WARNING_PCT: float = 0.003  # 0.3%
+    ALERT_SLIPPAGE_CRITICAL_PCT: float = 0.005  # 0.5%
+    ALERT_LATENCY_WARNING_MS: float = 2000  # 2 seconds
+    ALERT_LATENCY_CRITICAL_MS: float = 5000  # 5 seconds
+    ALERT_FILL_RATE_WARNING_PCT: float = 95.0  # Below 95%
+    ALERT_WEBSOCKET_RECONNECT_THRESHOLD: int = 5  # Per hour
+    
     # General
     APP_ENV: str = "development"
     LOG_LEVEL: str = "INFO"

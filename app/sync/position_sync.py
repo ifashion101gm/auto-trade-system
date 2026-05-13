@@ -73,10 +73,11 @@ class PositionSyncService:
         
         while self._running:
             try:
-                async with db_session_factory() as db_session:
+                async for db_session in db_session_factory():
                     await self.sync_once(db_session)
                     # Reset failure counter on success
                     consecutive_db_failures = 0
+                    break  # Only need one iteration from the generator
                 
                 # Normal sync interval
                 await asyncio.sleep(self._sync_interval)
@@ -127,8 +128,9 @@ class PositionSyncService:
             # Import db session factory dynamically to avoid circular imports
             from app.database.connection import get_session
             
-            async with get_session() as db_session:
+            async for db_session in get_session():
                 await self.sync_once(db_session)
+                break  # Only need one iteration
             
             logger.info("✅ Immediate sync completed after WebSocket reconnect")
         except Exception as e:
@@ -157,7 +159,7 @@ class PositionSyncService:
         
         # Step 1: Get exchange positions with error handling
         try:
-            exchange_positions = await self.executor.get_open_positions()
+            exchange_positions = await self.executor.get_positions()
             
             # Validate position data before processing
             validated_positions = []
@@ -482,7 +484,7 @@ class PositionSyncService:
     async def get_sync_status(self) -> Dict[str, Any]:
         """Get current sync status for monitoring."""
         try:
-            positions = await self.executor.get_open_positions()
+            positions = await self.executor.get_positions()
             balance = await self.executor.get_balance()
             
             return {

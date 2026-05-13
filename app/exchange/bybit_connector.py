@@ -61,7 +61,8 @@ class BybitConnector(BaseExchange):
             raise ValueError("Bybit API credentials not configured")
         
         # Log masked credentials for security (Bybit skill requirement)
-        logger.info(f"🔑 Bybit API Key: {BybitClient.mask_api_key(api_key)}")
+        masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "***"
+        logger.info(f"🔑 Bybit API Key: {masked_key}")
         
         # Initialize mode before adapter (adapter needs to access self.mode)
         self._mode = 'DEMO' if self.demo_trading else 'LIVE'
@@ -384,7 +385,7 @@ class BybitConnector(BaseExchange):
         try:
             positions = await self.adapter.execute_with_retry(
                 "get_positions",
-                self.client.fetch_positions
+                self.client.fetch_open_positions
             )
             return positions or []
         except Exception as e:

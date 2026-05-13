@@ -133,3 +133,66 @@ CIRCUIT_BREAKER_STATE = Gauge(
     'Circuit breaker state (0=closed, 1=half-open, 2=open)',
     ['component']
 )
+
+# === AI/LLM Layer Metrics ===
+LLM_TOKEN_USAGE = Counter(
+    'llm_token_usage_total',
+    'Total LLM tokens consumed',
+    ['provider', 'model', 'agent_type']
+)
+
+AI_CONFIDENCE_SCORES = Histogram(
+    'ai_confidence_scores',
+    'AI agent confidence scores',
+    ['agent_type', 'decision'],
+    buckets=[0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0]
+)
+
+# === Infrastructure Health Metrics ===
+DB_CONNECTION_POOL_SIZE = Gauge(
+    'database_connection_pool_size',
+    'Database connection pool size',
+    ['pool_type']  # active, idle, total
+)
+
+REDIS_CONNECTION_STATUS = Gauge(
+    'redis_connection_status',
+    'Redis connection status (1=connected, 0=disconnected)'
+)
+
+API_RATE_LIMIT_REMAINING = Gauge(
+    'api_rate_limit_remaining',
+    'Remaining API rate limit calls',
+    ['exchange', 'endpoint']
+)
+
+# === Risk Management Enhanced Metrics ===
+RISK_EXPOSURE_USD = Gauge(
+    'risk_current_exposure_usd',
+    'Current total exposure in USD',
+    ['user_id']
+)
+
+DAILY_LOSS_LIMIT_PCT = Gauge(
+    'daily_loss_limit_percentage',
+    'Daily loss limit as percentage of balance',
+    ['user_id']
+)
+
+POSITION_SIZING_ADHERENCE = Gauge(
+    'position_sizing_adherence_pct',
+    'Position sizing adherence to limits (%)',
+    ['strategy']
+)
+
+EXECUTION_LATENCY_P95 = Gauge(
+    'execution_latency_p95_ms',
+    '95th percentile execution latency',
+    ['exchange']
+)
+
+ORDER_FILL_RATE = Gauge(
+    'order_fill_rate_pct',
+    'Order fill rate percentage',
+    ['exchange', 'order_type']  # market, limit
+)

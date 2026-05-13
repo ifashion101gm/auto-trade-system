@@ -1039,3 +1039,95 @@ class TelegramNotifier:
         message += f"\n<i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i>"
         
         return await self.send_message(message)
+
+    async def send_critical_alert(self, alert_type: str, details: Dict[str, Any]) -> bool:
+        """
+        Send critical alert for immediate attention.
+        
+        Args:
+            alert_type: Type of critical alert
+            details: Alert details dictionary
+            
+        Returns:
+            True if sent successfully
+        """
+        emoji_map = {
+            'daily_loss_limit': '🚨',
+            'circuit_breaker_trip': '⚡',
+            'infrastructure_failure': '💥',
+            'risk_violation': '⛔',
+            'high_slippage': '📉',
+            'latency_spike': '⏱️',
+            'emergency_stop': '🛑',
+            'position_stuck': '🔒',
+            'exchange_disconnected': '🔌',
+            'bot_restarted': '🔄',
+            'pnl_anomaly': '⚠️'
+        }
+        
+        emoji = emoji_map.get(alert_type, '🚨')
+        
+        message = f"""
+{emoji} <b>CRITICAL ALERT: {alert_type.upper()}</b>
+
+<b>Details:</b>
+"""
+        for key, value in details.items():
+            formatted_key = key.replace('_', ' ').title()
+            message += f"• {formatted_key}: {value}\n"
+        
+        message += f"\n<b>Timestamp:</b> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        message += f"\n<b>Action Required:</b> Immediate review needed"
+        
+        return await self.send_message(message.strip())
+
+    async def send_daily_summary(self, metrics: Dict[str, Any]) -> bool:
+        """
+        Send daily performance summary.
+        
+        Args:
+            metrics: Dictionary with daily performance metrics
+            
+        Returns:
+            True if sent successfully
+        """
+        # Determine overall sentiment
+        pnl = metrics.get('pnl', 0)
+        if pnl > 0:
+            emoji = "📈"
+            sentiment = "PROFITABLE"
+        elif pnl < 0:
+            emoji = "📉"
+            sentiment = "LOSS"
+        else:
+            emoji = "➖"
+            sentiment = "NEUTRAL"
+        
+        message = f"""
+{emoji} <b>Daily Trading Summary</b>
+
+<b>Performance:</b> {sentiment}
+• P&L: ${metrics.get('pnl', 0):+,.2f} ({metrics.get('pnl_pct', 0):+.2f}%)
+• Win Rate: {metrics.get('win_rate', 0):.1f}%
+• Total Trades: {metrics.get('total_trades', 0)}
+• Max Drawdown: {metrics.get('max_drawdown', 0):.2f}%
+
+<b>Risk Status:</b>
+• Exposure: ${metrics.get('exposure_usd', 0):,.2f}
+• Daily Loss Remaining: {metrics.get('daily_loss_remaining_pct', 0):.2f}%
+• Circuit Breaker: {metrics.get('circuit_breaker_state', 'CLOSED')}
+
+<b>Execution Quality:</b>
+• Avg Latency: {metrics.get('avg_latency_ms', 0):.0f}ms
+• Avg Slippage: {metrics.get('avg_slippage_pct', 0):.3f}%
+• Fill Rate: {metrics.get('fill_rate_pct', 100):.1f}%
+
+<b>Infrastructure:</b>
+• API Status: {'✅' if metrics.get('api_healthy', True) else '❌'}
+• DB Status: {'✅' if metrics.get('db_healthy', True) else '❌'}
+• WebSocket: {'✅' if metrics.get('websocket_connected', True) else '❌'}
+
+<i>{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</i>
+        """.strip()
+        
+        return await self.send_message(message)

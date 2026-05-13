@@ -159,6 +159,35 @@ class SpendTracker:
             f"Daily: ${self.current_daily_spend:.4f}/{self.daily_limit:.2f}"
         )
     
+    async def record_spend(self, model_tier: str, cost_usd: float, tokens: int = 0):
+        """
+        Record LLM spend directly (async wrapper for API compatibility).
+        
+        Args:
+            model_tier: Model tier/name
+            cost_usd: Cost in USD
+            tokens: Number of tokens used
+        """
+        self._check_and_reset_windows()
+        
+        # Update counters
+        self.current_daily_spend += cost_usd
+        self.current_weekly_spend += cost_usd
+        self.current_monthly_spend += cost_usd
+        
+        self.daily_token_count += tokens
+        self.weekly_token_count += tokens
+        
+        self.daily_request_count += 1
+        self.weekly_request_count += 1
+        
+        logger.debug(
+            f"💰 LLM spend recorded: {model_tier} | "
+            f"Cost: ${cost_usd:.6f} | "
+            f"Tokens: {tokens} | "
+            f"Daily: ${self.current_daily_spend:.4f}/{self.daily_limit:.2f}"
+        )
+    
     def check_budget_status(self) -> Dict[str, Any]:
         """
         Check current budget status and determine allowed actions.
@@ -313,4 +342,31 @@ class SpendTracker:
                 'weekly': self.weekly_limit,
                 'monthly': self.monthly_limit
             }
+        }
+    
+    # Async wrapper methods for API compatibility
+    async def get_total_today_spend(self) -> float:
+        """Get total spend today (async wrapper)."""
+        return self.current_daily_spend
+    
+    async def get_budget_remaining(self) -> float:
+        """Get remaining budget (async wrapper)."""
+        return max(0, self.daily_limit - self.current_daily_spend)
+    
+    async def is_over_budget(self) -> bool:
+        """Check if over budget (async wrapper)."""
+        return self.current_daily_spend >= self.daily_limit
+    
+    async def get_usage_summary(self) -> Dict[str, Any]:
+        """Get usage summary (async wrapper for API compatibility)."""
+        status = self.check_budget_status()
+        return {
+            'daily_spend': status['daily']['spent'],
+            'daily_limit': status['daily']['limit'],
+            'daily_remaining': status['daily']['remaining'],
+            'daily_percentage': status['daily']['percentage'],
+            'weekly_spend': status['weekly']['spent'],
+            'monthly_spend': status['monthly']['spent'],
+            'degradation_level': status['degradation_level'],
+            'can_use_premium_models': status['can_use_premium_models']
         }

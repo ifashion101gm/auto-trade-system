@@ -84,6 +84,97 @@ class LiveTradingService:
         logger.info(f"   Mode: {self.execution_mode}")
         logger.info(f"   AI: {'OpenRouter' if use_openrouter else 'Heuristic'}")
         logger.info(f"   State Machine: Enabled")
+        
+        # Initialize self-healing agents
+        from app.services.startup_recovery import StartupRecoveryService
+        from app.services.position_monitor import PositionMonitor
+        from app.services.reconciliation_service import PositionReconciliationService
+        from app.execution.reconciliation_engine import PositionReconciliationEngine
+        from app.execution.agents.signal_agent import SignalAgent
+        from app.execution.agents.execution_agent import ExecutionAgent
+        from app.execution.agents.verification_agent import VerificationAgent
+        from app.execution.agents.monitoring_agent import MonitoringAgent
+        from app.execution.agents.recovery_agent import RecoveryAgent
+        from app.execution.agents.reconciliation_agent import ReconciliationAgent
+        
+        # Initialize dependencies
+        self.position_monitor = PositionMonitor(
+            event_bus=event_bus,
+            exchange_manager=self.exchange_manager,
+            check_interval=5.0
+        )
+        
+        self.reconciliation_service = PositionReconciliationService(
+            exchange_manager=self.exchange_manager
+        )
+        
+        self.reconciliation_engine = PositionReconciliationEngine(
+            testnet=self.use_testnet
+        )
+        
+        self.startup_recovery = StartupRecoveryService(
+            exchange_manager=self.exchange_manager,
+            position_monitor=self.position_monitor,
+            reconciliation_service=self.reconciliation_service,
+            circuit_breaker=self.circuit_breaker,
+            event_bus=event_bus,
+            notifier=self.notifier
+        )
+        
+        # Initialize agents
+        self.signal_agent = SignalAgent(
+            orchestrator=self.orchestrator,
+            risk_engine=self.risk_engine,
+            validator=self.validator
+        )
+        
+        self.execution_agent = ExecutionAgent(
+            exchange_manager=self.exchange_manager,
+            max_retries=3,
+            max_slippage_pct=0.5
+        )
+        
+        self.verification_agent = VerificationAgent(
+            exchange_manager=self.exchange_manager
+        )
+        
+        self.monitoring_agent = MonitoringAgent(
+            circuit_breaker=self.circuit_breaker,
+            position_monitor=self.position_monitor,
+            max_latency_ms=5000,
+            max_drawdown_pct=5.0
+        )
+        
+        self.recovery_agent = RecoveryAgent(
+            startup_recovery=self.startup_recovery,
+            event_bus=event_bus
+        )
+        
+        self.reconciliation_agent = ReconciliationAgent(
+            reconciliation_service=self.reconciliation_service,
+            reconciliation_engine=self.reconciliation_engine
+        )
+        
+        # Initialize advanced self-healing features
+        from app.execution.dedup_engine import DuplicateProtectionEngine
+        from app.execution.anomaly_detector import AnomalyDetector
+        
+        self.dedup_engine = DuplicateProtectionEngine(
+            redis_client=None,  # TODO: Add Redis when available
+            signal_ttl_seconds=3600,
+            order_ttl_seconds=86400
+        )
+        
+        self.anomaly_detector = AnomalyDetector(
+            window_size=100,
+            latency_threshold_std=3.0,
+            failure_rate_threshold=0.3,
+            slippage_threshold_std=2.5,
+            max_trades_per_hour=20,
+            cooldown_seconds=300
+        )
+        
+        logger.info("✅ Advanced self-healing features initialized (dedup + anomaly detection)")
     
     async def _transition_to(self, new_state: ExecutionState):
         """
@@ -163,6 +254,21 @@ class LiveTradingService:
         }
         
         try:
+            # Pre-cycle health check via Monitoring Agent
+            await self._transition_to(ExecutionState.IDLE)
+            
+            health_check = await self.monitoring_agent.run({
+                'user_id': user_id,
+                'db_session': db_session,
+                'exchange_manager': self.exchange_manager
+            })
+            
+            if not health_check.get('can_continue_trading', True):
+                logger.warning("⚠️ Trading blocked by health check")
+                results['status'] = 'blocked_by_health_check'
+                results['health_issues'] = health_check.get('issues', [])
+                return results
+            
             # Check circuit breaker before starting cycle
             health_state = await self.circuit_breaker.check_system_health()
             if not health_state.can_trade:
@@ -255,6 +361,19 @@ class LiveTradingService:
             logger.info(f"   Take Profit: ${proposal['take_profit']:,.2f}")
             logger.info(f"   Leverage: {proposal['leverage']}x")
             
+            # Duplicate signal check
+            logger.info("\n🔒 Checking for duplicate signals...")
+            dedup_result = await self.dedup_engine.check_and_mark_signal(proposal)
+            
+            if dedup_result['is_duplicate']:
+                logger.warning(f"⚠️  Duplicate signal detected - rejecting trade")
+                results['status'] = 'duplicate_signal_rejected'
+                results['dedup_hash'] = dedup_result['signal_hash']
+                return results
+            
+            logger.info(f"   ✅ Signal unique (hash: {dedup_result['signal_hash'][:16]}...)")
+            results['dedup_hash'] = dedup_result['signal_hash']
+            
             # Transition: PROPOSING -> VALIDATING
             await self._transition_to(ExecutionState.VALIDATING)
             
@@ -315,27 +434,96 @@ class LiveTradingService:
                     endpoint='create_market_order'
                 )
                 
+                # Record metrics for anomaly detection
+                self.anomaly_detector.record_latency(execution_time_ms)
+                self.anomaly_detector.record_order_result(True)
+                
                 # Record slippage if order executed
                 if execution_result['status'] == 'executed':
+                    slippage_pct = abs(
+                        execution_result.get('filled_price', proposal['entry_price']) - proposal['entry_price']
+                    ) / proposal['entry_price'] * 100
+                    
                     await self.circuit_breaker.record_fill_slippage(
                         symbol=symbol,
                         expected_price=proposal['entry_price'],
                         actual_price=execution_result.get('filled_price', proposal['entry_price'])
                     )
+                    
+                    # Record slippage for anomaly detection
+                    self.anomaly_detector.record_slippage(slippage_pct)
+                    
+                    # Check for anomalies
+                    anomalies = self.anomaly_detector.run_comprehensive_check(
+                        current_latency_ms=execution_time_ms,
+                        current_slippage_pct=slippage_pct
+                    )
+                    
+                    if anomalies:
+                        logger.warning(f"⚠️ Anomalies detected during execution:")
+                        for anomaly in anomalies:
+                            logger.warning(f"  [{anomaly['severity']}] {anomaly['message']}")
+                        
+                        # Store anomalies in results
+                        results['anomalies'] = anomalies
+                        
+                        # If critical anomaly, consider pausing trading
+                        critical_anomalies = [a for a in anomalies if a['severity'] == 'CRITICAL']
+                        if critical_anomalies:
+                            logger.error("🚨 Critical anomalies detected - may need to pause trading")
+                            results['status'] = 'paused_due_to_anomalies'
+                            results['critical_anomalies'] = critical_anomalies
+                            return results
+                    
+                    # Record trade for overtrading detection
+                    self.anomaly_detector.record_trade(symbol, proposal['side'])
                 
             except Exception as e:
                 # Record API failure for circuit breaker
+                execution_time_ms = (time.time() - execution_start) * 1000
                 await self.circuit_breaker.record_api_call(
                     success=False,
-                    latency_ms=(time.time() - execution_start) * 1000,
+                    latency_ms=execution_time_ms,
                     endpoint='create_market_order'
                 )
+                
+                # Record failure for anomaly detection
+                self.anomaly_detector.record_latency(execution_time_ms)
+                self.anomaly_detector.record_order_result(False)
+                
                 raise
             
             results['stages']['execution'] = execution_result['status']
             results['execution'] = execution_result
             
             if execution_result['status'] == 'executed':
+                # Post-execution verification via Verification Agent
+                logger.info("\n🔍 Verifying execution...")
+                verification_result = await self.verification_agent.run({
+                    'execution_result': execution_result,
+                    'proposal': proposal,
+                    'db_session': db_session
+                })
+                
+                results['agents'] = results.get('agents', {})
+                results['agents']['verification'] = verification_result
+                
+                if not verification_result.get('verification_passed'):
+                    logger.warning("⚠️ Verification failed - triggering recovery")
+                    
+                    recovery_result = await self.recovery_agent.run({
+                        'issues': [{
+                            'type': 'verification_failed',
+                            'details': verification_result.get('checks')
+                        }],
+                        'user_id': user_id,
+                        'db_session': db_session
+                    })
+                    results['agents']['recovery'] = recovery_result
+                    
+                    results['status'] = 'verification_failed_recovered'
+                    return results
+                
                 # Transition: VALIDATING -> EXECUTING -> MONITORING
                 await self._transition_to(ExecutionState.EXECUTING)
                 await self._transition_to(ExecutionState.MONITORING)
@@ -360,6 +548,22 @@ class LiveTradingService:
             
             # Transition: MONITORING -> IDLE (cycle complete)
             await self._transition_to(ExecutionState.IDLE)
+            
+            # Post-cycle reconciliation if DB session available
+            if db_session:
+                logger.info("\n🔄 Running post-cycle reconciliation...")
+                try:
+                    reconciliation_result = await self.reconciliation_agent.run({
+                        'user_id': user_id,
+                        'db_session': db_session
+                    })
+                    results['agents'] = results.get('agents', {})
+                    results['agents']['reconciliation'] = reconciliation_result
+                    
+                    await self._transition_to(ExecutionState.RECONCILING)
+                    await self._transition_to(ExecutionState.IDLE)
+                except Exception as recon_error:
+                    logger.error(f"Reconciliation failed: {recon_error}")
             
             results['status'] = 'success'
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
@@ -939,6 +1143,61 @@ class LiveTradingService:
     async def close(self):
         """Close all connections."""
         await self.exchange_manager.close()
+    
+    async def run_periodic_reconciliation(
+        self,
+        user_id: str = "default_user",
+        db_session: Optional[AsyncSession] = None
+    ) -> Dict[str, Any]:
+        """
+        Run periodic reconciliation outside of trading cycles.
+        
+        Should be called every 60 seconds by background task.
+        """
+        if not db_session:
+            return {'status': 'skipped', 'reason': 'No DB session'}
+        
+        try:
+            result = await self.reconciliation_agent.run({
+                'user_id': user_id,
+                'db_session': db_session
+            })
+            
+            if not result.get('is_synced', True):
+                logger.warning(
+                    f"⚠️ Reconciliation found issues: "
+                    f"{result.get('repaired_count', 0)} repaired, "
+                    f"{result.get('orphaned_positions', 0)} orphaned"
+                )
+                
+                # Send alert if critical issues found
+                if result.get('ghost_positions', 0) > 0:
+                    await self.notifier.send_message(
+                        f"🚨 Ghost positions detected: {result['ghost_positions']}"
+                    )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Periodic reconciliation failed: {e}")
+            return {'status': 'failed', 'error': str(e)}
+    
+    async def get_system_health_report(self) -> Dict[str, Any]:
+        """
+        Get comprehensive system health report including anomaly detection stats.
+        
+        Returns:
+            Dictionary with system health metrics
+        """
+        return {
+            'timestamp': datetime.utcnow().isoformat(),
+            'anomaly_detection': {
+                'baselines': self.anomaly_detector.get_baseline_stats(),
+                'alerts_triggered': self.anomaly_detector.alert_counts
+            },
+            'deduplication': await self.dedup_engine.get_stats(),
+            'circuit_breaker': await self.circuit_breaker.check_system_health()
+        }
     
     async def execute_dual_gold_trade(
         self,
