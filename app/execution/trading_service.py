@@ -24,6 +24,7 @@ from app.database.models import PaperTrades, DecisionJournal, StrategyEvaluation
 from app.learning.param_cache import LearningParameterCache
 from app.logging_config import get_logger
 from app.execution.states import ExecutionState, is_valid_transition
+from app.execution.state_validator import state_validator
 from app.events.event_bus import event_bus
 
 logger = get_logger(__name__)
@@ -86,7 +87,7 @@ class LiveTradingService:
     
     async def _transition_to(self, new_state: ExecutionState):
         """
-        Transition to a new execution state with validation.
+        Transition to a new execution state with strict validation.
         
         Args:
             new_state: Target state to transition to
@@ -96,12 +97,11 @@ class LiveTradingService:
         """
         old_state = self.current_state
         
-        # Validate transition
-        if not is_valid_transition(old_state, new_state):
-            raise ValueError(
-                f"Invalid state transition: {old_state.value} -> {new_state.value}. "
-                f"Allowed transitions: {[s.value for s in is_valid_transition.__globals__.get('VALID_TRANSITIONS', {}).get(old_state, [])]}"
-            )
+        # Validate transition using state validator (with audit trail)
+        state_validator.validate_execution_transition(
+            old_state, new_state,
+            context=f"LiveTradingService.{old_state.value}"
+        )
         
         # Perform transition
         self.current_state = new_state
@@ -121,7 +121,7 @@ class LiveTradingService:
         except Exception as e:
             logger.warning(f"Failed to publish state change event: {e}")
         
-        logger.debug(f"🔄 State transition: {old_state.value} -> {new_state.value}")
+        logger.info(f"🔄 State transition: {old_state.value} → {new_state.value}")
     
     def get_state_metrics(self) -> Dict[str, Any]:
         """Get state machine metrics."""

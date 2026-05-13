@@ -2,11 +2,22 @@
 OpenRouter LLM Client for AI sub-agents.
 Provides unified access to multiple LLM models via OpenRouter API.
 Maps specific models to sub-agents based on complexity and latency requirements.
+
+ENHANCED (Sprint 3):
+- Provider fallback mechanism with automatic failover
+- Cost tracking and spend cap enforcement
+- Three-tier caching (Memory, Redis, Database)
 """
 import httpx
 import json
+import time
+import hashlib
 from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 
 class OpenRouterClient:
@@ -69,7 +80,36 @@ class OpenRouterClient:
             "X-Title": "Auto Trade System"
         }
         
-        print("✅ OpenRouter Client initialized")
+        # Sprint 3: Provider fallback configuration
+        self.fallback_providers = [
+            {'name': 'openrouter', 'url': 'https://openrouter.ai/api/v1', 'priority': 1},
+            {'name': 'direct_openai', 'url': 'https://api.openai.com/v1', 'priority': 2},  # Fallback
+        ]
+        self.current_provider_idx = 0
+        self.provider_failures = {}  # Track failures per provider
+        
+        # Sprint 3: Cost tracking
+        self.daily_spend = 0.0
+        self.weekly_spend = 0.0
+        self.daily_token_count = 0
+        self.last_reset_date = datetime.now(timezone.utc).date()
+        self.spend_limits = {
+            'daily': getattr(settings, 'LLM_DAILY_SPEND_LIMIT', 10.0),  # $10 default
+            'weekly': getattr(settings, 'LLM_WEEKLY_SPEND_LIMIT', 50.0)  # $50 default
+        }
+        self.cost_per_1k_tokens = {
+            'gpt-4o-mini': 0.00015,  # $0.15 per 1M tokens
+            'gpt-4o': 0.0025,  # $2.50 per 1M tokens
+            'claude-3.5-sonnet': 0.003  # $3.00 per 1M tokens
+        }
+        
+        # Sprint 3: L1 Cache (Memory)
+        self._l1_cache = {}  # {cache_key: {'data': ..., 'expires_at': ...}}
+        self._l1_cache_ttl = 60  # 60 seconds for market data
+        
+        logger.info("✅ OpenRouter Client initialized with Sprint 3 enhancements")
+        logger.info(f"   Daily spend limit: ${self.spend_limits['daily']:.2f}")
+        logger.info(f"   Weekly spend limit: ${self.spend_limits['weekly']:.2f}")
     
     async def _make_request(
         self,

@@ -7,14 +7,18 @@ Features:
 - Dead letter queue for failed handlers
 - Event batching for high-frequency updates
 - Async processing with error isolation
+- **STRICT ORDERING**: Sequence IDs per symbol to prevent race conditions
+- **IDEMPOTENT CONSUMERS**: Duplicate detection and safe ignoring
+- **ORDERED PROCESSING**: Buffer out-of-order events until gaps filled
 
 Events flow: Exchange → Sync Agent → Event Bus → DB + Telegram + Dashboard
 """
 import asyncio
 import logging
-from typing import Callable, Dict, List, Any, Optional, Tuple
+from typing import Callable, Dict, List, Any, Optional, Tuple, Set
 from datetime import datetime
 from collections import deque
+import uuid
 
 from app.logging_config import get_logger
 
@@ -47,10 +51,18 @@ class EventBus:
         self._running = False
         self._max_queue_size = max_queue_size
         
+        # **NEW: Sequence tracking for strict ordering**
+        self._sequence_counters: Dict[str, int] = {}  # symbol -> next expected sequence
+        self._processed_sequences: Dict[str, Set[int]] = {}  # symbol -> processed seq IDs
+        self._out_of_order_buffer: Dict[str, List[Dict]] = {}  # symbol -> buffered events
+        
         # Metrics
         self.events_published = 0
         self.events_processed = 0
         self.events_failed = 0
+        self.duplicates_ignored = 0
+        self.out_of_order_events = 0
+        self.sequence_gaps_detected = 0
         
         logger.info(f"✅ EventBus initialized (max_queue_size={max_queue_size})")
     
@@ -78,14 +90,27 @@ class EventBus:
         
         Args:
             event_type: Type of event
-            payload: Event data
+            payload: Event data (should include 'symbol' for ordering)
             priority: Event priority (lower = higher priority, default=10)
         """
+        # Generate sequence ID for symbol-based ordering
+        symbol = payload.get('symbol', '__global__')
+        if symbol not in self._sequence_counters:
+            self._sequence_counters[symbol] = 0
+            self._processed_sequences[symbol] = set()
+            self._out_of_order_buffer[symbol] = []
+        
+        seq_id = self._sequence_counters[symbol]
+        self._sequence_counters[symbol] += 1
+        
         event = {
+            'event_id': str(uuid.uuid4()),
             'type': event_type,
             'payload': payload,
             'timestamp': datetime.utcnow().isoformat(),
-            'priority': priority
+            'priority': priority,
+            'sequence': seq_id,
+            'symbol': symbol
         }
         
         try:
@@ -97,7 +122,7 @@ class EventBus:
             # Store in history
             self._event_history.append(event)
             
-            logger.debug(f"📨 Published event: {event_type} (priority={priority})")
+            logger.debug(f"📨 Published event: {event_type} seq={seq_id} (priority={priority})")
             
         except asyncio.QueueFull:
             logger.warning(f"⚠️  Event queue full! Dropping event: {event_type}")
@@ -159,10 +184,43 @@ class EventBus:
         """
         Dispatch event to all subscribers for that event type.
         
+        **ENHANCED**: Checks sequence ordering and idempotency before dispatching.
+        
         Args:
-            event: Event dict with type, payload, timestamp
+            event: Event dict with type, payload, timestamp, sequence
         """
         event_type = event['type']
+        symbol = event.get('symbol', '__global__')
+        seq_id = event.get('sequence', 0)
+        
+        # Check for duplicate events (idempotency)
+        if symbol in self._processed_sequences and seq_id in self._processed_sequences[symbol]:
+            logger.debug(f"🔁 Ignoring duplicate event: {event_type} seq={seq_id}")
+            self.duplicates_ignored += 1
+            return
+        
+        # Check sequence ordering
+        expected_seq = self._sequence_counters.get(symbol, 0)
+        if seq_id != expected_seq - 1:  # -1 because counter already incremented
+            # Out-of-order event detected
+            logger.warning(
+                f"⚠️  Out-of-order event: {event_type} seq={seq_id}, expected={expected_seq - 1}"
+            )
+            self.out_of_order_events += 1
+            
+            # Buffer out-of-order events
+            if symbol not in self._out_of_order_buffer:
+                self._out_of_order_buffer[symbol] = []
+            self._out_of_order_buffer[symbol].append(event)
+            
+            # Check if we can process buffered events now
+            await self._process_buffered_events(symbol)
+            return
+        
+        # Mark as processed
+        if symbol not in self._processed_sequences:
+            self._processed_sequences[symbol] = set()
+        self._processed_sequences[symbol].add(seq_id)
         
         if event_type not in self._subscribers:
             logger.debug(f"No subscribers for event: {event_type}")
@@ -226,11 +284,90 @@ class EventBus:
             'events_published': self.events_published,
             'events_processed': self.events_processed,
             'events_failed': self.events_failed,
+            'duplicates_ignored': self.duplicates_ignored,
+            'out_of_order_events': self.out_of_order_events,
+            'sequence_gaps_detected': self.sequence_gaps_detected,
             'queue_size': self._event_queue.qsize(),
             'dead_letter_count': len(self._dead_letter_queue),
             'subscriber_count': sum(len(handlers) for handlers in self._subscribers.values()),
-            'event_types': list(self._subscribers.keys())
+            'event_types': list(self._subscribers.keys()),
+            'buffered_events': sum(len(buf) for buf in self._out_of_order_buffer.values())
         }
+    
+    async def _process_buffered_events(self, symbol: str):
+        """
+        Process buffered out-of-order events when gaps are filled.
+        
+        Args:
+            symbol: Symbol to process buffered events for
+        """
+        if symbol not in self._out_of_order_buffer:
+            return
+        
+        buffer = self._out_of_order_buffer[symbol]
+        expected_seq = self._sequence_counters.get(symbol, 0) - 1
+        
+        # Find events that can now be processed (in sequence order)
+        ready_events = []
+        remaining_buffer = []
+        
+        for event in sorted(buffer, key=lambda e: e.get('sequence', 0)):
+            seq_id = event.get('sequence', 0)
+            if seq_id == expected_seq + len(ready_events):
+                ready_events.append(event)
+            else:
+                remaining_buffer.append(event)
+        
+        # Update buffer
+        self._out_of_order_buffer[symbol] = remaining_buffer
+        
+        # Process ready events in order
+        for event in ready_events:
+            logger.info(f"📦 Processing buffered event: {event['type']} seq={event['sequence']}")
+            await self._dispatch_event_internal(event)
+
+    async def _dispatch_event_internal(self, event: Dict[str, Any]):
+        """
+        Internal dispatch without ordering checks (for buffered events).
+        
+        Args:
+            event: Event to dispatch
+        """
+        event_type = event['type']
+        symbol = event.get('symbol', '__global__')
+        seq_id = event.get('sequence', 0)
+        
+        # Mark as processed
+        if symbol not in self._processed_sequences:
+            self._processed_sequences[symbol] = set()
+        self._processed_sequences[symbol].add(seq_id)
+        
+        if event_type not in self._subscribers:
+            return
+        
+        # Call all handlers
+        tasks = []
+        for priority, handler in self._subscribers[event_type]:
+            try:
+                task = asyncio.create_task(handler(event))
+                tasks.append(task)
+            except Exception as e:
+                logger.error(f"Failed to create handler task: {e}")
+        
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    handler_info = f"{event_type}_handler_{i}"
+                    logger.error(f"Handler {handler_info} failed: {result}")
+                    self._dead_letter_queue.append({
+                        'reason': 'handler_failed',
+                        'event': event,
+                        'handler': handler_info,
+                        'error': str(result),
+                        'timestamp': datetime.utcnow().isoformat()
+                    })
+                    self.events_failed += 1
 
 
 # Global event bus instance

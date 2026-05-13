@@ -390,10 +390,20 @@ class SystemCircuitBreaker:
             elapsed = (datetime.utcnow() - self.triggered_at).total_seconds()
             
             if elapsed >= self.recovery_timeout:
-                logger.info("🔧 Circuit breaker: Testing recovery (HALF_OPEN)")
+                logger.info("🔧 Circuit breaker: Transitioning to HALF_OPEN for recovery test")
                 self.state = 'HALF_OPEN'
                 
-                # Run a quick health check
+                # Send notification about recovery attempt
+                try:
+                    await self.notifier.send_circuit_breaker_alert(
+                        state='HALF_OPEN',
+                        reason='Testing recovery after timeout',
+                        metrics={}
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send HALF_OPEN alert: {e}")
+                
+                # Run a comprehensive health check
                 health = await self.check_system_health()
                 
                 if health.can_trade:
@@ -404,17 +414,26 @@ class SystemCircuitBreaker:
                     
                     # Reset counters
                     self.api_failure_count = 0
+                    self.recent_slippages.clear()
                     
                     await self.notifier.send_circuit_breaker_alert(
                         state='CLOSED',
-                        reason='System recovered',
+                        reason='System recovered successfully',
                         metrics={}
                     )
                     
                     return True
                 else:
-                    logger.warning("⚠️  Circuit breaker: Recovery test failed, staying OPEN")
+                    logger.warning("⚠️  Circuit breaker: Recovery test failed, returning to OPEN")
                     self.state = 'OPEN'
+                    self.triggered_at = datetime.utcnow()  # Reset timer
+                    
+                    await self.notifier.send_circuit_breaker_alert(
+                        state='OPEN',
+                        reason=f'Recovery failed: {health.reason or "Health check failed"}',
+                        metrics={}
+                    )
+                    
                     return False
         
         return False

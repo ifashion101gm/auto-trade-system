@@ -556,3 +556,131 @@ class Signals(Base):
         Index('idx_signals_symbol_time', 'symbol', 'timestamp'),
         Index('idx_signals_trade', 'trade_id'),
     )
+
+
+# =============================================================================
+# Sprint 4: Paper Trading & Shadow Mode Models (Layer 4/5)
+# =============================================================================
+
+
+class ShadowTrades(Base):
+    """Shadow mode simulated trades for divergence analysis."""
+    __tablename__ = 'shadow_trades'
+
+    id = Column(String(36), primary_key=True)
+    timestamp = Column(DateTime, nullable=False, server_default=func.now())
+    user_id = Column(String(50), nullable=False)
+    exchange = Column(String(20), nullable=False)  # Primary exchange being shadowed
+    symbol = Column(String(20), nullable=False)
+    side = Column(String(10), nullable=False)  # 'LONG' or 'SHORT'
+    status = Column(String(20), nullable=False, server_default='open')  # open, closed, tp_hit, sl_hit
+    
+    # Entry details
+    entry_price_simulated = Column(Float, nullable=False)  # Simulated fill price with slippage
+    entry_price_actual = Column(Float, nullable=True)  # Actual market price at signal time
+    slippage_applied = Column(Float, nullable=True)  # Slippage percentage applied
+    quantity = Column(Float, nullable=False)
+    leverage = Column(Integer, nullable=False)
+    
+    # Exit details
+    exit_price_simulated = Column(Float, nullable=True)
+    exit_price_actual = Column(Float, nullable=True)
+    exit_reason = Column(String(30), nullable=True)  # 'TAKE_PROFIT', 'STOP_LOSS', 'MANUAL', 'TIMEOUT'
+    
+    # Risk parameters
+    stop_loss = Column(Float, nullable=True)
+    take_profit = Column(Float, nullable=True)
+    
+    # Performance tracking
+    pnl_simulated = Column(Float, nullable=True)  # Simulated P&L
+    pnl_actual = Column(Float, nullable=True)  # What would have happened in reality
+    divergence_pct = Column(Float, nullable=True)  # Difference between simulated and actual
+    accuracy_score = Column(Float, nullable=True)  # Direction prediction accuracy (0-100%)
+    
+    # Metadata
+    strategy_name = Column(String(100), nullable=True)
+    regime = Column(String(50), nullable=True)
+    confidence = Column(Float, nullable=True)
+    session = Column(String(50), nullable=True)  # Trading session (Asia, London, NY)
+    
+    # Timing
+    opened_at = Column(DateTime, nullable=False, server_default=func.now())
+    closed_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+    
+    __table_args__ = (
+        Index('idx_shadow_trades_user_status', 'user_id', 'status'),
+        Index('idx_shadow_trades_symbol', 'symbol'),
+        Index('idx_shadow_trades_timestamp', 'timestamp'),
+    )
+
+
+class ShadowPerformanceMetrics(Base):
+    """Aggregated shadow mode performance metrics."""
+    __tablename__ = 'shadow_performance_metrics'
+
+    id = Column(String(36), primary_key=True)
+    timestamp = Column(DateTime, nullable=False, server_default=func.now())
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    user_id = Column(String(50), nullable=False)
+    
+    # Trade statistics
+    total_trades = Column(Integer, nullable=False, server_default='0')
+    winning_trades = Column(Integer, nullable=False, server_default='0')
+    losing_trades = Column(Integer, nullable=False, server_default='0')
+    win_rate = Column(Float, nullable=True)
+    
+    # Performance metrics
+    total_pnl = Column(Float, nullable=True)
+    avg_pnl_per_trade = Column(Float, nullable=True)
+    sharpe_ratio = Column(Float, nullable=True)
+    sortino_ratio = Column(Float, nullable=True)
+    max_drawdown_pct = Column(Float, nullable=True)
+    profit_factor = Column(Float, nullable=True)
+    
+    # Accuracy metrics
+    accuracy_score = Column(Float, nullable=True)  # Overall direction prediction accuracy
+    avg_divergence_pct = Column(Float, nullable=True)  # Average difference from reality
+    
+    # Risk metrics
+    avg_leverage = Column(Float, nullable=True)
+    avg_position_size = Column(Float, nullable=True)
+    risk_adjusted_return = Column(Float, nullable=True)
+    
+    # Validation status
+    validation_passed = Column(Integer, nullable=False, server_default='0')  # Meets go-live criteria?
+    notes = Column(Text, nullable=True)
+    
+    __table_args__ = (
+        Index('idx_shadow_perf_user_period', 'user_id', 'period_start'),
+    )
+
+
+class ExchangeHealthChecks(Base):
+    """Exchange connectivity and health monitoring logs."""
+    __tablename__ = 'exchange_health_checks'
+
+    id = Column(String(36), primary_key=True)
+    timestamp = Column(DateTime, nullable=False, server_default=func.now())
+    exchange = Column(String(20), nullable=False)  # 'mexc', 'binance', 'bybit'
+    endpoint = Column(String(50), nullable=False)  # 'ticker', 'balance', 'orders'
+    
+    # Health metrics
+    status = Column(String(20), nullable=False)  # 'healthy', 'degraded', 'unhealthy'
+    latency_ms = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+    
+    # Rate limiting
+    rate_limit_remaining = Column(Integer, nullable=True)
+    rate_limit_reset_at = Column(DateTime, nullable=True)
+    
+    # Failover tracking
+    is_primary = Column(Integer, nullable=False, server_default='1')
+    failover_triggered = Column(Integer, nullable=False, server_default='0')
+    failover_to_exchange = Column(String(20), nullable=True)
+    
+    __table_args__ = (
+        Index('idx_health_exchange_time', 'exchange', 'timestamp'),
+        Index('idx_health_status', 'status'),
+    )

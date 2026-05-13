@@ -209,7 +209,7 @@ class PositionMonitor:
         db_session: AsyncSession
     ):
         """
-        Close position and update database.
+        Close position with exchange order and database update.
         
         Args:
             trade_id: Trade ID to close
@@ -218,7 +218,21 @@ class PositionMonitor:
             db_session: Database session
         """
         try:
-            # Fetch trade record
+            # Step 1: Execute close order on exchange
+            position = self.monitored_positions[trade_id]
+            order_result = await self._execute_close_order(
+                trade_id=trade_id,
+                symbol=position['symbol'],
+                side=position['side'],
+                quantity=position['quantity'],
+                exit_price=exit_price,
+                reason=reason
+            )
+            
+            # Use actual executed price if available
+            actual_exit_price = order_result.get('executed_price', exit_price)
+            
+            # Step 2: Fetch and update trade record
             from sqlalchemy import select
             stmt = select(PaperTrades).where(PaperTrades.id == trade_id)
             result = await db_session.execute(stmt)
@@ -228,36 +242,40 @@ class PositionMonitor:
                 logger.error(f"Trade {trade_id} not found in database")
                 return
             
-            # Calculate P&L
+            # Step 3: Calculate P&L using actual execution price
             if trade.side == 'LONG':
-                profit = (exit_price - trade.entry_price) * trade.qty
+                profit = (actual_exit_price - trade.entry_price) * trade.qty
             else:
-                profit = (trade.entry_price - exit_price) * trade.qty
+                profit = (trade.entry_price - actual_exit_price) * trade.qty
             
-            profit_pct = (profit / (trade.entry_price * trade.qty)) * 100
+            profit_pct = (profit / (trade.entry_price * trade.qty)) * 100 if trade.entry_price > 0 else 0
             
-            # Update trade record
+            # Step 4: Update trade record
             trade.ts_close = datetime.utcnow().isoformat()
-            trade.exit_price = exit_price
+            trade.exit_price = actual_exit_price
             trade.profit = profit
             trade.profit_pct = profit_pct
             trade.status = 'closed'
-            trade.notes += f"\n{reason} at ${exit_price:.2f}, P&L: ${profit:.2f} ({profit_pct:.2f}%)"
+            trade.notes += f"\n{reason} at ${actual_exit_price:.2f}, P&L: ${profit:.2f} ({profit_pct:.2f}%)"
+            
+            if not order_result['success']:
+                trade.notes += f"\nWARNING: Exchange order failed, used fallback price"
             
             await db_session.commit()
             
-            # Publish event
+            # Step 5: Publish high-priority event
             await self.event_bus.publish(
                 TP_HIT if reason == 'TP_HIT' else SL_HIT,
                 {
                     'trade_id': trade_id,
                     'symbol': trade.symbol,
-                    'exit_price': exit_price,
+                    'exit_price': actual_exit_price,
                     'profit': profit,
                     'profit_pct': profit_pct,
-                    'reason': reason
+                    'reason': reason,
+                    'exchange_order_success': order_result['success']
                 },
-                priority=2  # High priority
+                priority=2
             )
             
             logger.info(
@@ -326,3 +344,57 @@ class PositionMonitor:
             'active_tasks': len(self.monitoring_tasks),
             'trade_ids': list(self.monitored_positions.keys())
         }
+    
+    async def _execute_close_order(
+        self,
+        trade_id: str,
+        symbol: str,
+        side: str,
+        quantity: float,
+        exit_price: float,
+        reason: str
+    ) -> Dict[str, Any]:
+        """
+        Execute actual close order on exchange.
+        
+        Args:
+            trade_id: Trade ID being closed
+            symbol: Trading pair
+            side: Original position side ('LONG' or 'SHORT')
+            quantity: Position quantity to close
+            exit_price: Expected exit price
+            reason: 'SL_HIT' or 'TP_HIT'
+        
+        Returns:
+            Order execution result
+        """
+        try:
+            # Determine close side (opposite of original)
+            close_side = 'SELL' if side == 'LONG' else 'BUY'
+            
+            # Execute market order to close position
+            order_result = await self.exchange_manager.create_market_order(
+                symbol=symbol,
+                side=close_side,
+                amount=quantity
+            )
+            
+            logger.info(
+                f"🎯 Close order executed for {trade_id}: "
+                f"{close_side} {quantity} @ ${order_result.get('price', exit_price):.2f}"
+            )
+            
+            return {
+                'success': True,
+                'order_id': order_result.get('order_id'),
+                'executed_price': order_result.get('price', exit_price),
+                'executed_quantity': order_result.get('filled', quantity)
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to execute close order for {trade_id}: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'fallback_price': exit_price
+            }

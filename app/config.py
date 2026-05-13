@@ -4,6 +4,7 @@ Centralized configuration management using Pydantic Settings.
 import os
 from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field
 
 
 class Settings(BaseSettings):
@@ -167,6 +168,12 @@ class Settings(BaseSettings):
     # Cooldown and consecutive loss tracking
     RISK_COOLDOWN_PERIOD_SECONDS: int = 300  # 5 minutes after consecutive losses
     RISK_MAX_CONSECUTIVE_LOSSES: int = 3
+    
+    # Concurrent position limits
+    RISK_MAX_CONCURRENT_POSITIONS: int = Field(
+        default=3,
+        description="Maximum number of concurrent open positions"
+    )
     
     # =========================================================================
     # Circuit Breaker Configuration (Enhanced)

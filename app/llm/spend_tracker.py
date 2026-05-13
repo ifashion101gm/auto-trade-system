@@ -1,172 +1,316 @@
 """
-LLM Spend Tracker with Redis persistence.
-Zone B Optimization: Track and cap LLM spending across model tiers.
+LLM Spend Cap Enforcement - Budget guardrails and cost control.
+Prevents runaway token costs through real-time tracking and automatic degradation.
+
+Features:
+- Real-time spend tracking (per request, hourly, daily, weekly)
+- Automatic model downgrade when approaching limits
+- Telegram alerts for budget warnings
+- Hard caps that block non-critical requests
+- Cost-aware routing decisions
 """
 import time
-import json
-from typing import Dict, Optional
-from datetime import datetime, date
+from typing import Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+
+from app.config import settings
+from app.logging_config import get_logger
+from app.notifications.notifier import TelegramNotifier
+
+logger = get_logger(__name__)
 
 
-class LLMSpendTracker:
-    """
-    Tracks LLM API spending by model tier with Redis persistence.
+class SpendTracker:
+    """Track LLM spending across multiple time windows."""
     
-    Zone B Optimization:
-    - Persistent spend tracking in Redis (survives restarts)
-    - Daily budget caps per model tier
-    - Real-time cost monitoring
-    - Automatic alerts when approaching limits
-    """
-    
-    def __init__(self, redis_client=None, daily_budget_usd: float = 2.0):
+    def __init__(
+        self,
+        daily_limit: float = None,
+        weekly_limit: float = None,
+        monthly_limit: float = None
+    ):
         """
         Initialize spend tracker.
         
         Args:
-            redis_client: Redis client instance for persistence
-            daily_budget_usd: Maximum daily spend limit
+            daily_limit: Daily spend limit in USD
+            weekly_limit: Weekly spend limit in USD
+            monthly_limit: Monthly spend limit in USD
         """
-        self._redis = redis_client
-        self._daily_budget = daily_budget_usd
+        self.daily_limit = daily_limit or getattr(settings, 'LLM_DAILY_SPEND_LIMIT', 10.0)
+        self.weekly_limit = weekly_limit or getattr(settings, 'LLM_WEEKLY_SPEND_LIMIT', 50.0)
+        self.monthly_limit = monthly_limit or getattr(settings, 'LLM_MONTHLY_SPEND_LIMIT', 200.0)
         
-        # In-memory fallback if Redis not available
-        self._memory_spends: Dict[str, float] = {}
-        self._memory_date: Optional[str] = None
+        # Cost tracking
+        self.current_daily_spend = 0.0
+        self.current_weekly_spend = 0.0
+        self.current_monthly_spend = 0.0
+        
+        # Token tracking
+        self.daily_token_count = 0
+        self.weekly_token_count = 0
+        
+        # Request counting
+        self.daily_request_count = 0
+        self.weekly_request_count = 0
+        
+        # Time tracking
+        self.last_reset_time = datetime.now(timezone.utc)
+        self.today = self.last_reset_time.date()
+        self.this_week_start = self._get_week_start(self.last_reset_time)
+        self.this_month_start = self.last_reset_time.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Per-request cost tracking
+        self.cost_per_1k_tokens = {
+            'gpt-4o-mini': 0.00015,  # $0.15 per 1M tokens
+            'gpt-4o': 0.0025,  # $2.50 per 1M tokens
+            'claude-3.5-sonnet': 0.003,  # $3.00 per 1M tokens
+            'gemini-pro': 0.0005,  # $0.50 per 1M tokens
+        }
+        
+        logger.info(f"✅ SpendTracker initialized")
+        logger.info(f"   Daily limit: ${self.daily_limit:.2f}")
+        logger.info(f"   Weekly limit: ${self.weekly_limit:.2f}")
+        logger.info(f"   Monthly limit: ${self.monthly_limit:.2f}")
     
-    async def record_spend(self, model_tier: str, cost_usd: float, tokens: int = 0):
+    def _get_week_start(self, dt: datetime) -> datetime:
+        """Get start of current week (Monday)."""
+        start = dt - timedelta(days=dt.weekday())
+        return start.replace(hour=0, minute=0, second=0, microsecond=0)
+    
+    def _check_and_reset_windows(self):
+        """Check if we need to reset any time windows."""
+        now = datetime.now(timezone.utc)
+        
+        # Reset daily if new day
+        if now.date() > self.today:
+            logger.info(f"📊 Daily spend reset: ${self.current_daily_spend:.4f} spent yesterday")
+            self.current_daily_spend = 0.0
+            self.daily_token_count = 0
+            self.daily_request_count = 0
+            self.today = now.date()
+        
+        # Reset weekly if new week
+        current_week_start = self._get_week_start(now)
+        if current_week_start > self.this_week_start:
+            logger.info(f"📊 Weekly spend reset: ${self.current_weekly_spend:.4f} spent last week")
+            self.current_weekly_spend = 0.0
+            self.weekly_token_count = 0
+            self.weekly_request_count = 0
+            self.this_week_start = current_week_start
+        
+        # Reset monthly if new month
+        if now.month > self.this_month_start.month or now.year > self.this_month_start.year:
+            logger.info(f"📊 Monthly spend reset: ${self.current_monthly_spend:.4f} spent last month")
+            self.current_monthly_spend = 0.0
+            self.this_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    
+    def calculate_cost(self, model: str, token_count: int) -> float:
         """
-        Record LLM API spend.
+        Calculate cost for a request.
         
         Args:
-            model_tier: Model tier name (e.g., "gemini-flash-free", "gpt-4o-mini")
-            cost_usd: Cost in USD
-            tokens: Number of tokens used
-        """
-        today = date.today().isoformat()
-        key = f"llm_spend:{today}:{model_tier}"
+            model: Model name
+            token_count: Number of tokens used
         
-        if self._redis:
-            try:
-                import redis.asyncio as redis
-                # Increment spend for this model tier today
-                await self._redis.incrbyfloat(key, cost_usd)
-                
-                # Set expiry to 2 days (keep for audit)
-                await self._redis.expire(key, 172800)
-                
-                # Record token usage
-                token_key = f"llm_tokens:{today}:{model_tier}"
-                await self._redis.incr(token_key, tokens)
-                await self._redis.expire(token_key, 172800)
-                
-            except Exception as e:
-                print(f"⚠ Redis spend tracking error: {e}")
-                self._record_memory_spend(model_tier, cost_usd, today)
-        else:
-            self._record_memory_spend(model_tier, cost_usd, today)
-    
-    def _record_memory_spend(self, model_tier: str, cost_usd: float, today: str):
-        """Record spend in memory (fallback)."""
-        if self._memory_date != today:
-            self._memory_spends.clear()
-            self._memory_date = today
-        
-        self._memory_spends[model_tier] = self._memory_spends.get(model_tier, 0) + cost_usd
-    
-    async def get_today_spend(self, model_tier: Optional[str] = None) -> Dict[str, float]:
-        """
-        Get today's spend by model tier.
-        
-        Args:
-            model_tier: Specific tier or None for all tiers
-            
         Returns:
-            Dictionary of model tier -> spend amount
+            Cost in USD
         """
-        today = date.today().isoformat()
+        cost_per_token = self.cost_per_1k_tokens.get(model, 0.001) / 1000  # Default $1 per 1M
+        return token_count * cost_per_token
+    
+    def record_usage(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        agent_type: str = 'unknown'
+    ):
+        """
+        Record LLM usage and update spend tracking.
         
-        if self._redis:
-            try:
-                import redis.asyncio as redis
-                
-                if model_tier:
-                    # Get specific tier
-                    key = f"llm_spend:{today}:{model_tier}"
-                    value = await self._redis.get(key)
-                    return {model_tier: float(value) if value else 0.0}
-                else:
-                    # Get all tiers for today
-                    pattern = f"llm_spend:{today}:*"
-                    spends = {}
-                    async for key in self._redis.scan_iter(match=pattern):
-                        value = await self._redis.get(key)
-                        tier = key.decode().split(":")[-1]
-                        spends[tier] = float(value) if value else 0.0
-                    return spends
-                    
-            except Exception as e:
-                print(f"⚠ Redis spend retrieval error: {e}")
+        Args:
+            model: Model used
+            prompt_tokens: Input tokens
+            completion_tokens: Output tokens
+            agent_type: Type of agent making request
+        """
+        self._check_and_reset_windows()
         
-        # Fallback to memory
-        if model_tier:
-            return {model_tier: self._memory_spends.get(model_tier, 0.0)}
+        total_tokens = prompt_tokens + completion_tokens
+        cost = self.calculate_cost(model, total_tokens)
+        
+        # Update counters
+        self.current_daily_spend += cost
+        self.current_weekly_spend += cost
+        self.current_monthly_spend += cost
+        
+        self.daily_token_count += total_tokens
+        self.weekly_token_count += total_tokens
+        
+        self.daily_request_count += 1
+        self.weekly_request_count += 1
+        
+        logger.debug(
+            f"💰 LLM usage: {model} | "
+            f"Tokens: {total_tokens} (prompt={prompt_tokens}, completion={completion_tokens}) | "
+            f"Cost: ${cost:.6f} | "
+            f"Daily: ${self.current_daily_spend:.4f}/{self.daily_limit:.2f}"
+        )
+    
+    def check_budget_status(self) -> Dict[str, Any]:
+        """
+        Check current budget status and determine allowed actions.
+        
+        Returns:
+            Budget status with recommendations
+        """
+        self._check_and_reset_windows()
+        
+        # Calculate percentages
+        daily_pct = self.current_daily_spend / self.daily_limit if self.daily_limit > 0 else 0
+        weekly_pct = self.current_weekly_spend / self.weekly_limit if self.weekly_limit > 0 else 0
+        monthly_pct = self.current_monthly_spend / self.monthly_limit if self.monthly_limit > 0 else 0
+        
+        # Determine degradation level
+        if daily_pct >= 1.0 or weekly_pct >= 1.0 or monthly_pct >= 1.0:
+            degradation_level = 'BLOCK_ALL'
+        elif daily_pct >= 0.90 or weekly_pct >= 0.90:
+            degradation_level = 'HEURISTIC_ONLY'
+        elif daily_pct >= 0.75 or weekly_pct >= 0.75:
+            degradation_level = 'DOWNGRADE_TO_MINI'
+        elif daily_pct >= 0.50:
+            degradation_level = 'WARNING'
         else:
-            return self._memory_spends.copy()
-    
-    async def get_total_today_spend(self) -> float:
-        """Get total spend across all model tiers today."""
-        spends = await self.get_today_spend()
-        return sum(spends.values())
-    
-    async def is_over_budget(self) -> bool:
-        """Check if today's spend exceeds daily budget."""
-        total = await self.get_total_today_spend()
-        return total >= self._daily_budget
-    
-    async def get_budget_remaining(self) -> float:
-        """Get remaining budget for today."""
-        total = await self.get_total_today_spend()
-        return max(0.0, self._daily_budget - total)
-    
-    async def reset_daily_spend(self):
-        """Reset daily spend counter (admin operation)."""
-        today = date.today().isoformat()
-        
-        if self._redis:
-            try:
-                import redis.asyncio as redis
-                pattern = f"llm_spend:{today}:*"
-                async for key in self._redis.scan_iter(match=pattern):
-                    await self._redis.delete(key)
-            except Exception as e:
-                print(f"⚠ Redis reset error: {e}")
-        
-        # Reset memory
-        self._memory_spends.clear()
-        self._memory_date = today
-    
-    async def get_usage_summary(self) -> Dict:
-        """Get comprehensive usage summary."""
-        today = date.today().isoformat()
-        spends = await self.get_today_spend()
-        total = sum(spends.values())
+            degradation_level = 'NORMAL'
         
         return {
-            "date": today,
-            "total_spend_usd": round(total, 4),
-            "daily_budget_usd": self._daily_budget,
-            "budget_remaining_usd": round(max(0.0, self._daily_budget - total), 4),
-            "budget_used_pct": round((total / self._daily_budget * 100) if self._daily_budget > 0 else 0, 2),
-            "over_budget": total >= self._daily_budget,
-            "spend_by_tier": {tier: round(amount, 4) for tier, amount in spends.items()},
-            "model_tiers_used": len(spends)
+            'degradation_level': degradation_level,
+            'daily': {
+                'spent': round(self.current_daily_spend, 4),
+                'limit': self.daily_limit,
+                'percentage': round(daily_pct * 100, 2),
+                'remaining': round(max(0, self.daily_limit - self.current_daily_spend), 4)
+            },
+            'weekly': {
+                'spent': round(self.current_weekly_spend, 4),
+                'limit': self.weekly_limit,
+                'percentage': round(weekly_pct * 100, 2),
+                'remaining': round(max(0, self.weekly_limit - self.current_weekly_spend), 4)
+            },
+            'monthly': {
+                'spent': round(self.current_monthly_spend, 4),
+                'limit': self.monthly_limit,
+                'percentage': round(monthly_pct * 100, 2),
+                'remaining': round(max(0, self.monthly_limit - self.current_monthly_spend), 4)
+            },
+            'can_use_premium_models': degradation_level in ['NORMAL', 'WARNING'],
+            'can_use_any_llm': degradation_level != 'BLOCK_ALL',
+            'should_alert': daily_pct >= 0.80 or weekly_pct >= 0.80
         }
     
-    @property
-    def daily_budget(self) -> float:
-        return self._daily_budget
+    def should_block_request(self, agent_type: str = 'non-critical') -> bool:
+        """
+        Determine if request should be blocked based on budget.
+        
+        Args:
+            agent_type: Type of agent ('critical' or 'non-critical')
+        
+        Returns:
+            True if request should be blocked
+        """
+        status = self.check_budget_status()
+        degradation = status['degradation_level']
+        
+        # Block all if at limit
+        if degradation == 'BLOCK_ALL':
+            return True
+        
+        # Block non-critical if severely over budget
+        if degradation == 'HEURISTIC_ONLY' and agent_type != 'critical':
+            return True
+        
+        return False
     
-    @daily_budget.setter
-    def daily_budget(self, value: float):
-        self._daily_budget = value
+    def get_recommended_model(self, requested_model: str) -> str:
+        """
+        Get recommended model based on budget status.
+        
+        Args:
+            requested_model: Originally requested model
+        
+        Returns:
+            Downgraded model if necessary
+        """
+        status = self.check_budget_status()
+        degradation = status['degradation_level']
+        
+        if degradation == 'HEURISTIC_ONLY':
+            return 'heuristic'  # No LLM, use rules
+        elif degradation == 'DOWNGRADE_TO_MINI':
+            # Downgrade premium models to mini
+            if requested_model in ['gpt-4o', 'claude-3.5-sonnet']:
+                return 'gpt-4o-mini'
+        elif degradation == 'WARNING':
+            # Just log warning, no downgrade yet
+            pass
+        
+        return requested_model
+    
+    async def send_budget_alert(
+        self,
+        notifier: TelegramNotifier,
+        status: Dict[str, Any]
+    ):
+        """
+        Send Telegram alert for budget warnings.
+        
+        Args:
+            notifier: Telegram notifier instance
+            status: Budget status from check_budget_status()
+        """
+        if not status.get('should_alert'):
+            return
+        
+        degradation = status['degradation_level']
+        daily = status['daily']
+        weekly = status['weekly']
+        
+        message = (
+            f"⚠️ **LLM Budget Alert**\n\n"
+            f"**Status:** {degradation}\n\n"
+            f"**Daily Spend:** ${daily['spent']:.4f} / ${daily['limit']:.2f} ({daily['percentage']}%)\n"
+            f"**Weekly Spend:** ${weekly['spent']:.4f} / ${weekly['limit']:.2f} ({weekly['percentage']}%)\n\n"
+        )
+        
+        if degradation == 'BLOCK_ALL':
+            message += "🚨 **ALL LLM CALLS BLOCKED** - Budget exceeded!\n"
+        elif degradation == 'HEURISTIC_ONLY':
+            message += "⚠️ Only heuristic mode available (no LLM calls)\n"
+        elif degradation == 'DOWNGRADE_TO_MINI':
+            message += "⬇️ Premium models downgraded to GPT-4o-mini\n"
+        else:
+            message += "ℹ️ Approaching budget limits\n"
+        
+        await notifier.send_message(message)
+        logger.warning(f"Budget alert sent: {degradation}")
+    
+    def get_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive spend metrics."""
+        self._check_and_reset_windows()
+        
+        return {
+            'current_daily_spend': round(self.current_daily_spend, 4),
+            'current_weekly_spend': round(self.current_weekly_spend, 4),
+            'current_monthly_spend': round(self.current_monthly_spend, 4),
+            'daily_token_count': self.daily_token_count,
+            'weekly_token_count': self.weekly_token_count,
+            'daily_request_count': self.daily_request_count,
+            'weekly_request_count': self.weekly_request_count,
+            'limits': {
+                'daily': self.daily_limit,
+                'weekly': self.weekly_limit,
+                'monthly': self.monthly_limit
+            }
+        }

@@ -22,6 +22,19 @@ from loguru import logger
 from app.config import settings
 
 
+def get_logger(name: str = None):
+    """
+    Get a logger instance (compatibility wrapper for loguru).
+    
+    Args:
+        name: Logger name (optional, for compatibility)
+    
+    Returns:
+        Loguru logger instance
+    """
+    return logger
+
+
 # ============================================================================
 # Log Directory Setup
 # ============================================================================

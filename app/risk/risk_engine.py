@@ -82,6 +82,11 @@ class RiskEngine:
         self.last_loss_time: Optional[float] = None
         self.today_date: str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         
+        # NEW: Concurrent position tracking
+        self.open_positions: Dict[str, Dict[str, Any]] = {}  # trade_id -> position_info
+        self.total_exposure_usd = 0.0
+        self.max_concurrent_positions = getattr(settings, 'RISK_MAX_CONCURRENT_POSITIONS', 3)
+        
         logger.info("✅ Risk Engine initialized")
         logger.info(f"   Daily Loss Limit: {self.max_daily_loss_pct:.1%}")
         logger.info(f"   Max Drawdown: {self.max_drawdown_pct:.1%}")
@@ -173,6 +178,12 @@ class RiskEngine:
             )
             logger.warning(f"🚫 Cooldown period active: {cooldown_status['remaining_seconds']}s remaining")
             return decision
+        
+        # Check 6: Concurrent positions (NEW)
+        if self.db_session:
+            await self._validate_concurrent_positions(user_id, self.db_session, decision)
+            if not decision.approved:
+                return decision
         
         # Calculate risk score (0-100, higher = riskier)
         decision.risk_score = self._calculate_risk_score(proposal, decision)
@@ -419,6 +430,115 @@ class RiskEngine:
             'remaining_seconds': int(remaining),
             'reason': f'Cooldown active after {self.consecutive_losses} consecutive losses'
         }
+    
+    async def _validate_concurrent_positions(
+        self,
+        user_id: str,
+        db_session: AsyncSession,
+        result: RiskDecision
+    ):
+        """Validate against concurrent position limits and total exposure."""
+        try:
+            # Query open positions from database
+            from sqlalchemy import select, func
+            from app.database.models import PaperTrades
+            
+            stmt = select(PaperTrades).where(
+                PaperTrades.user_id == user_id,
+                PaperTrades.status == 'open'
+            )
+            query_result = await db_session.execute(stmt)
+            open_trades = query_result.scalars().all()
+            
+            open_count = len(open_trades)
+            result.open_positions_count = open_count
+            
+            # Check concurrent position limit
+            if open_count >= self.max_concurrent_positions:
+                result.approved = False
+                result.violations.append(
+                    f"Maximum concurrent positions reached: {open_count}/{self.max_concurrent_positions}"
+                )
+                return
+            
+            # Calculate total exposure
+            total_exposure = 0.0
+            for trade in open_trades:
+                position_value = trade.entry_price * trade.qty
+                if trade.leverage and trade.leverage > 1:
+                    position_value = position_value / trade.leverage
+                total_exposure += position_value
+            
+            self.total_exposure_usd = total_exposure
+            
+            # Check total exposure limit (max 10% of balance)
+            max_exposure = self.current_balance * 0.10
+            if total_exposure > max_exposure:
+                result.approved = False
+                result.violations.append(
+                    f"Total exposure ${total_exposure:.2f} exceeds limit ${max_exposure:.2f} "
+                    f"({total_exposure/self.current_balance*100:.1f}% of balance)"
+                )
+            
+            # Warning if approaching limit
+            elif total_exposure > max_exposure * 0.8:
+                result.warnings.append(
+                    f"Approaching exposure limit: ${total_exposure:.2f}/${max_exposure:.2f}"
+                )
+            
+            # Track positions in memory
+            for trade in open_trades:
+                self.open_positions[trade.id] = {
+                    'symbol': trade.symbol,
+                    'side': trade.side,
+                    'entry_price': trade.entry_price,
+                    'quantity': trade.qty,
+                    'exposure': trade.entry_price * trade.qty
+                }
+            
+        except Exception as e:
+            logger.error(f"Failed to validate concurrent positions: {e}")
+            result.warnings.append(f"Concurrent position validation error: {str(e)}")
+    
+    async def register_open_position(
+        self,
+        trade_id: str,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        quantity: float,
+        leverage: int = 1
+    ):
+        """Register newly opened position for tracking."""
+        exposure = (entry_price * quantity) / leverage if leverage > 1 else entry_price * quantity
+        
+        self.open_positions[trade_id] = {
+            'symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'quantity': quantity,
+            'leverage': leverage,
+            'exposure': exposure,
+            'opened_at': datetime.utcnow().isoformat()
+        }
+        
+        self.total_exposure_usd += exposure
+        
+        logger.info(
+            f"Position registered: {trade_id} - Exposure: ${exposure:.2f}, "
+            f"Total: ${self.total_exposure_usd:.2f}"
+        )
+
+    async def close_position(self, trade_id: str):
+        """Remove position from tracking when closed."""
+        if trade_id in self.open_positions:
+            exposure = self.open_positions[trade_id]['exposure']
+            del self.open_positions[trade_id]
+            self.total_exposure_usd -= exposure
+            
+            logger.info(
+                f"Position closed: {trade_id} - Remaining exposure: ${self.total_exposure_usd:.2f}"
+            )
     
     async def reset_daily_counters(self):
         """Reset daily P&L tracking at midnight UTC."""
