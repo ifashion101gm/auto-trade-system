@@ -8,6 +8,13 @@ from typing import Optional, Dict, Any, List
 from app.config import settings
 
 
+def _format_usd(value: Any, default: str = "N/A") -> str:
+    """Format numeric values as USD while tolerating missing optional fields."""
+    if value is None or value == "":
+        return default
+    return f"${float(value):,.2f}"
+
+
 class TelegramNotifier:
     """
     Sends notifications to Telegram bot.
@@ -168,7 +175,7 @@ class TelegramNotifier:
 <b>Metadata:</b>
 • Time: {trade_data.get('timestamp', 'Now')}
 • Exchange: {exchange}
-        ".strip()
+        """.strip()
         
         return await self.send_message(message)
     
@@ -327,24 +334,21 @@ class TelegramNotifier:
             emoji = "➖"
             result_text = "BREAKEVEN"
         
-        message = f"""
-<b>{emoji} TRADE CLOSED - {result_text}</b>
-
-<b>Symbol:</b> {symbol}
-<b>Side:</b> {side}
-<b>Entry:</b> ${entry_price:,.2f}
-<b>Exit:</b> ${exit_price:,.2f}
-
-<b>P&L Summary:</b>
-• Profit: ${profit:+.2f}
-• Return: {profit_pct:+.2f}%
-• Status: {status.upper()}
-• Order ID: <code>{order_id}</code>
-
-<b>Duration:</b> {duration if duration else 'N/A'}
-<b>Notes:</b> {notes if notes else 'N/A'}
-<b>Trade ID:</b> #{trade_data.get('trade_id', 'N/A')}
-        """.strip()
+        message = (
+            f"<b>{emoji} TRADE CLOSED - {result_text}</b>\n\n"
+            f"<b>Symbol:</b> {symbol}\n"
+            f"<b>Side:</b> {side}\n"
+            f"<b>Entry:</b> {_format_usd(entry_price)}\n"
+            f"<b>Exit:</b> {_format_usd(exit_price)}\n\n"
+            f"<b>P&L Summary:</b>\n"
+            f"• Profit: ${profit:+.2f}\n"
+            f"• Return: {profit_pct:+.2f}%\n"
+            f"• Status: {status.upper()}\n"
+            f"• Order ID: <code>{order_id}</code>\n\n"
+            f"<b>Duration:</b> {duration if duration else 'N/A'}\n"
+            f"<b>Notes:</b> {notes if notes else 'N/A'}\n"
+            f"<b>Trade ID:</b> #{trade_data.get('trade_id', 'N/A')}"
+        )
         
         return await self.send_message(message)
     
@@ -400,24 +404,20 @@ class TelegramNotifier:
             emoji = "➖"
             sentiment = "NEUTRAL"
         
-        message = f"""
-<b>{emoji} DAILY TRADING SUMMARY</b>
-
-<b>Performance:</b> {sentiment}
-<b>Total P&L:</b> ${total_profit:.2f}
-
-<b>Trade Statistics:</b>
-• Total Trades: {total_trades}
-• Winning: {winning_trades}
-• Losing: {losing_trades}
-• Win Rate: {win_rate:.1f}%
-• Avg Profit/Trade: ${avg_profit:.2f}
-
-<b>Risk Metrics:</b>
-• Max Drawdown: {max_drawdown:.2f}%
-
-<b>Date:</b> {summary_data.get('date', 'Today')}
-        """.strip()
+        message = (
+            f"<b>{emoji} DAILY TRADING SUMMARY</b>\n\n"
+            f"<b>Performance:</b> {sentiment}\n"
+            f"<b>Total P&L:</b> {_format_usd(total_profit)}\n\n"
+            f"<b>Trade Statistics:</b>\n"
+            f"• Total Trades: {total_trades}\n"
+            f"• Winning: {winning_trades}\n"
+            f"• Losing: {losing_trades}\n"
+            f"• Win Rate: {win_rate:.1f}%\n"
+            f"• Avg Profit/Trade: {_format_usd(avg_profit)}\n\n"
+            f"<b>Risk Metrics:</b>\n"
+            f"• Max Drawdown: {max_drawdown:.2f}%\n\n"
+            f"<b>Date:</b> {summary_data.get('date', 'Today')}"
+        )
         
         return await self.send_message(message)
     
@@ -461,27 +461,22 @@ class TelegramNotifier:
         binance_emoji = "✅" if binance_status == 'success' else "❌"
         mexc_emoji = "✅" if mexc_status == 'success' else "❌"
         
-        message = f"""
-<b>🥇 GOLD DUAL TRADE EXECUTED</b>
-
-<b>Strategy:</b> {strategy}
-<b>Regime:</b> {regime}
-<b>Confidence:</b> {confidence*100:.1f}%
-
-<b>Binance Testnet (Paper):</b> {binance_emoji} {binance_status.upper()}
-• Symbol: PAXG/USDT
-• Price: ${binance_price:,.2f if binance_price else 'N/A'}
-
-<b>MEXC Live (Real):</b> {mexc_emoji} {mexc_status.upper()}
-• Symbol: XAUT/USDT
-• Price: ${mexc_price:,.2f if mexc_price else 'N/A'}
-
-<b>Comparison:</b>
-• Position Value: ${position_value:,.2f}
-• Price Difference: ${price_diff:,.2f if price_diff else 'N/A'}
-
-<i>Paper vs Live execution comparison for Gold futures</i>
-        """.strip()
+        message = (
+            f"<b>🥇 GOLD DUAL TRADE EXECUTED</b>\n\n"
+            f"<b>Strategy:</b> {strategy}\n"
+            f"<b>Regime:</b> {regime}\n"
+            f"<b>Confidence:</b> {confidence*100:.1f}%\n\n"
+            f"<b>Binance Testnet (Paper):</b> {binance_emoji} {binance_status.upper()}\n"
+            f"• Symbol: PAXG/USDT\n"
+            f"• Price: {_format_usd(binance_price)}\n\n"
+            f"<b>MEXC Live (Real):</b> {mexc_emoji} {mexc_status.upper()}\n"
+            f"• Symbol: XAUT/USDT\n"
+            f"• Price: {_format_usd(mexc_price)}\n\n"
+            f"<b>Comparison:</b>\n"
+            f"• Position Value: {_format_usd(position_value)}\n"
+            f"• Price Difference: {_format_usd(price_diff)}\n\n"
+            f"<i>Paper vs Live execution comparison for Gold futures</i>"
+        )
         
         return await self.send_message(message)
     
@@ -518,23 +513,21 @@ class TelegramNotifier:
         # Build message based on approval status
         if validation_result.approved:
             # APPROVED trade message
-            message = f"""
-<b>{emoji} TRADE VALIDATION: {status_text}</b>
-
-<b>Trade Details:</b>
-• Symbol: {symbol}
-• Side: {side}
-• Entry Price: ${entry_price:,.2f}
-• Quantity: {quantity}
-• Leverage: {leverage}x
-• Position Value: ${validation_result.position_value:,.2f}
-
-<b>Validation Results:</b>
-• Confidence: {confidence:.0%} (threshold: {validation_result.confidence_threshold:.0%}) ✅
-• Risk Amount: ${validation_result.risk_amount:.2f} (limit: {validation_result.risk_threshold:.0%}) ✅
-• Open Positions: {validation_result.open_positions_count} ✅
-• Daily Drawdown: {validation_result.daily_drawdown_pct:.2f}% ✅
-"""
+            message = (
+                f"<b>{emoji} TRADE VALIDATION: {status_text}</b>\n\n"
+                f"<b>Trade Details:</b>\n"
+                f"• Symbol: {symbol}\n"
+                f"• Side: {side}\n"
+                f"• Entry Price: {_format_usd(entry_price)}\n"
+                f"• Quantity: {quantity}\n"
+                f"• Leverage: {leverage}x\n"
+                f"• Position Value: {_format_usd(validation_result.position_value)}\n\n"
+                f"<b>Validation Results:</b>\n"
+                f"• Confidence: {confidence:.0%} (threshold: {validation_result.confidence_threshold:.0%}) ✅\n"
+                f"• Risk Amount: {_format_usd(validation_result.risk_amount)} (limit: {validation_result.risk_threshold:.0%}) ✅\n"
+                f"• Open Positions: {validation_result.open_positions_count} ✅\n"
+                f"• Daily Drawdown: {validation_result.daily_drawdown_pct:.2f}% ✅\n"
+            )
             # Add warnings if any
             if validation_result.warnings:
                 message += f"\n<b>Warnings:</b>\n"
@@ -547,19 +540,17 @@ class TelegramNotifier:
         
         else:
             # REJECTED trade message
-            message = f"""
-<b>{emoji} TRADE VALIDATION: {status_text}</b>
-
-<b>Trade Proposal:</b>
-• Symbol: {symbol}
-• Side: {side}
-• Entry Price: ${entry_price:,.2f}
-• Quantity: {quantity}
-• Leverage: {leverage}x
-• Confidence: {confidence:.0%}
-
-<b> VIOLATIONS ({len(validation_result.violations)}):</b>
-"""
+            message = (
+                f"<b>{emoji} TRADE VALIDATION: {status_text}</b>\n\n"
+                f"<b>Trade Proposal:</b>\n"
+                f"• Symbol: {symbol}\n"
+                f"• Side: {side}\n"
+                f"• Entry Price: {_format_usd(entry_price)}\n"
+                f"• Quantity: {quantity}\n"
+                f"• Leverage: {leverage}x\n"
+                f"• Confidence: {confidence:.0%}\n\n"
+                f"<b> VIOLATIONS ({len(validation_result.violations)}):</b>\n"
+            )
             # List all violations
             for i, violation in enumerate(validation_result.violations, 1):
                 message += f"{i}. {violation}\n"
