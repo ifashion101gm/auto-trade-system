@@ -13,6 +13,8 @@ Usage:
 import asyncio
 import sys
 import unittest
+import pytest
+pytest.importorskip("sqlalchemy")
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime

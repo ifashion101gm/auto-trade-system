@@ -3,11 +3,13 @@ Integration tests for single source of truth architecture.
 Tests WebSocket sync, reconciliation, and event flow.
 """
 import pytest
+pytest.importorskip("pytest_asyncio")
+pytest.importorskip("sqlalchemy")
 import asyncio
-from app.agents.sync_agent import SyncAgent
+from app.sync.sync_agent import SyncAgent
 from app.services.reconciliation_service import ReconciliationService
-from app.storage.db import get_session, engine
-from app.storage.repository import TradeRepository, PositionRepository
+from app.database.connection import engine
+from app.database.repositories import TradeRepository, PositionRepository
 from app.events.event_bus import event_bus
 from app.events.event_types import POSITION_UPDATED, ORDER_FILLED
 from sqlalchemy.ext.asyncio import AsyncSession

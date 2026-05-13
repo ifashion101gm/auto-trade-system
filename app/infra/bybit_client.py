@@ -7,8 +7,9 @@ IMPORTANT: CCXT has known issues with Bybit Demo Trading (GitHub #25545)
 Pybit is the official Bybit SDK with full demo trading support.
 """
 import logging
+import time
+
 import ccxt.async_support as ccxt
-from pybit.unified_trading import HTTP as PybitHTTP
 from typing import Dict, Any, Optional, List
 from app.config import settings
 from app.logging_config import get_logger
@@ -83,6 +84,8 @@ class BybitClient:
             # IMPORTANT: For demo trading, testnet parameter should be FALSE
             # Demo trading uses api-demo.bybit.com which is separate from testnet
             self.use_pybit = True
+            from pybit.unified_trading import HTTP as PybitHTTP
+
             self.pybit_session = PybitHTTP(
                 testnet=False,  # CRITICAL: Must be False for demo trading
                 demo=True,      # Enable demo trading mode (api-demo.bybit.com)
@@ -95,13 +98,8 @@ class BybitClient:
             logger.info(f"   Rate Limit: {settings.BYBIT_RATE_LIMIT_CALLS_PER_SECOND} req/sec")
             logger.info(f"   Recv Window: {settings.BYBIT_RECV_WINDOW}ms")
             
-            # Validate clock sync before proceeding (security baseline from Bybit skills)
-            try:
-                clock_sync_valid = await self.validate_clock_sync()
-                if not clock_sync_valid:
-                    logger.warning("⚠️  Clock sync validation failed - signatures may fail")
-            except Exception as e:
-                logger.warning(f"⚠️  Could not validate clock sync during init: {e}")
+            # Clock sync validation is async and must be called explicitly after construction.
+            logger.debug("Clock sync validation deferred; call validate_clock_sync() before private operations")
             
             # Set CCXT exchange for market data only (public endpoints work on CCXT)
             exchange_config = {
@@ -148,13 +146,8 @@ class BybitClient:
                 logger.info(f"   Rate Limit: {settings.BYBIT_RATE_LIMIT_CALLS_PER_SECOND} req/sec")
                 logger.info(f"   Recv Window: {settings.BYBIT_RECV_WINDOW}ms")
             
-            # Validate clock sync before proceeding (security baseline from Bybit skills)
-            try:
-                clock_sync_valid = await self.validate_clock_sync()
-                if not clock_sync_valid:
-                    logger.warning("⚠️  Clock sync validation failed - signatures may fail")
-            except Exception as e:
-                logger.warning(f"⚠️  Could not validate clock sync during init: {e}")
+            # Clock sync validation is async and must be called explicitly after construction.
+            logger.debug("Clock sync validation deferred; call validate_clock_sync() before private operations")
             
             self.exchange = ccxt.bybit(exchange_config)
     
@@ -331,11 +324,6 @@ class BybitClient:
         """
         try:
             server_time_ms = await self.fetch_server_time()
-            local_time_ms = int(asyncio.get_event_loop().time() * 1000)
-            
-            # Note: asyncio.time() gives monotonic time, not wall clock
-            # For proper clock sync, we should use time.time()
-            import time
             local_time_ms = int(time.time() * 1000)
             
             diff_seconds = abs(server_time_ms - local_time_ms) / 1000
