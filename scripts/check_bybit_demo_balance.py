@@ -54,8 +54,8 @@ async def check_bybit_demo_balance():
             )
             all_trades = result.scalars().all()
             
-            # Starting balance
-            initial_balance = 100.0
+            # Starting balance (actual Bybit Demo account balance verified via API)
+            initial_balance = 49997.72
             current_balance = initial_balance
             
             for trade in all_trades:
@@ -68,15 +68,15 @@ async def check_bybit_demo_balance():
             print(f"   Starting Balance: ${initial_balance:.2f}")
             print(f"   Current Balance: ${current_balance:.2f}")
             print(f"   Cumulative Profit: ${cumulative_profit:.2f}")
-            print(f"   Progress to $100 Goal: {(cumulative_profit/100)*100:.1f}%")
+            print(f"   Progress to $100 Profit Goal: {(cumulative_profit/100)*100:.1f}%")
             
             if cumulative_profit >= 100:
-                print(f"\n   🎉 GOAL ACHIEVED! Ready for live trading validation")
+                print(f"\n   🎉 GOAL ACHIEVED! $100 profit reached from $49,997.72 starting balance")
             elif cumulative_profit >= 50:
-                print(f"\n   ⚠️  Halfway there! Continue trading toward $100 goal")
+                print(f"\n   ⚠️  Halfway there! ${cumulative_profit:.2f}/$100 profit achieved")
             else:
                 remaining = 100 - cumulative_profit
-                print(f"\n   📈 Need ${remaining:.2f} more profit to reach $100 goal")
+                print(f"\n   📈 Need ${remaining:.2f} more profit to reach $100 goal (0.2% return target)")
             
             # Win rate
             wins = sum(1 for t in all_trades if t.profit and t.profit > 0)
@@ -121,7 +121,8 @@ async def check_bybit_demo_balance():
             print(f"   Max Drawdown: {max_drawdown:.2f}%")
             
         else:
-            print(f"\n⚠️  No closed trades yet. Starting balance: $100.00")
+            print(f"\n⚠️  No closed trades yet. Starting balance: $49,997.72 (actual demo balance)")
+            print(f"   Target: $100 cumulative profit (0.2% return)")
             print(f"   Need to execute trades to track progress toward $100 goal")
         
         print(f"\n{'=' * 80}")

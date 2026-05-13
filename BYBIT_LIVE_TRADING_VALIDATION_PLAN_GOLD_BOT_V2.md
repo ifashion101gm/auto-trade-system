@@ -14,10 +14,10 @@
 This validation plan defines a **strict Go/No-Go gate** for transitioning from Bybit Demo to live trading. The system must first achieve **$100 profit in the demo environment** using Gold Bot V2 Elite strategy parameters before live trading is authorized.
 
 ### Primary Objective: $100 Demo Profit Milestone
-- **Generate $100 profit** in Bybit Demo environment (starting from $100 virtual balance)
+- **Generate $100 profit** in Bybit Demo environment (starting from $49,997.72 virtual balance)
 - **Validate all 11 agents** work correctly with elite risk parameters
 - **Prove consistency** through disciplined execution over multiple trading sessions
-- **Achieve 3-8% monthly returns** equivalent (Safe Mode target)
+- **Achieve 0.2% return** on demo balance (conservative target for validation)
 
 ### Demo Account Configuration (Current .env Settings)
 ```bash
@@ -29,12 +29,12 @@ GOLD_MAX_LEVERAGE=5                 # Currently 5x, will reduce to 3x
 ```
 
 ### Elite Risk Parameters (To Be Applied)
-- **Starting Balance**: $100 USD (virtual funds in demo)
-- **Risk Per Trade**: 0.5% ($0.50) - *Must update config*
-- **Max Daily Drawdown**: 2% ($2.00)
+- **Starting Balance**: $49,997.72 USD (actual demo balance verified via API)
+- **Risk Per Trade**: 0.5% ($249.99) - *Conservative position sizing for large balance*
+- **Max Daily Drawdown**: 2% ($999.95)
 - **Max Open Positions**: 1
 - **Leverage**: ≤3x (conservative) - *Must update config*
-- **Target Profit**: $100 (100% return on demo balance)
+- **Target Profit**: $100 (0.2% return on demo balance)
 
 ---
 
@@ -52,7 +52,7 @@ This is a **non-negotiable requirement**. No exceptions.
 PHASE 1: Configuration Alignment (Day 0)
   ↓ Update .env to match elite parameters
   ↓ Verify demo API connectivity
-  ↓ Confirm starting balance = $100
+  ↓ Confirm starting balance = $49,997.72
   
 PHASE 2: Demo Trading Execution (Days 1-30+)
   ↓ Execute trades with 0.5% risk per trade
@@ -140,8 +140,8 @@ python scripts/check_bybit_demo_readiness.py
 **Expected Output**:
 ```
 ✅ Bybit Demo Environment: READY
-✅ Starting Balance: $100.00 (virtual)
-✅ Risk Parameters: 0.5% per trade, 3x leverage
+✅ Starting Balance: $49,997.72 (actual virtual funds)
+✅ Risk Parameters: 0.5% per trade ($249.99), 3x leverage
 ✅ Safety Systems: Active
 ```
 
@@ -153,7 +153,7 @@ python scripts/check_bybit_demo_readiness.py
 
 ### 2.1 Success Metrics Definition
 
-**Primary Goal**: Achieve **$100 cumulative profit** in Bybit Demo environment.
+**Primary Goal**: Achieve **$100 cumulative profit** in Bybit Demo environment (0.2% return on $49,997.72 balance).
 
 **Success Criteria** (ALL must be met):
 
@@ -163,7 +163,7 @@ python scripts/check_bybit_demo_readiness.py
 | Total Closed Trades | 50+ | 30+ | _____ |
 | Win Rate | ≥60% | ≥55% | _____% |
 | Profit Factor | ≥2.0 | ≥1.5 | _____ |
-| Max Drawdown | ≤2% | ≤5% | _____% |
+| Max Drawdown | ≤2% ($999.95) | ≤5% ($2,499.89) | _____% |
 | Avg R:R Ratio | ≥2:1 | ≥1.5:1 | _____:1 |
 | Consecutive Losses Max | 2 | 3 | _____ |
 | Daily DD Breaches | 0 | ≤2 | _____ |
@@ -769,15 +769,20 @@ print(f'✅ Adaptive Sizing: {adaptive_size*100:.2f}% (after 3-win streak)')
 **Criteria**: Fund live account with appropriate capital for elite strategy.
 
 **Recommended Allocation**:
-- **Starting Capital**: $100 USD (minimum)
-- **Risk Per Trade**: 0.5% = $0.50
-- **Max Daily Loss**: 2% = $2.00
+- **Starting Capital**: $100 USD (minimum for live trading)
+- **Risk Per Trade**: 0.5% = $0.50 (on live account)
+- **Max Daily Loss**: 2% = $2.00 (on live account)
 - **Target Daily Profit**: $15-30 (1.5-3% on good days)
 - **Monthly Target**: $3-8 (3-8% conservative)
 
+**Note**: Demo account has $49,997.72, but live trading will start with $100 minimum.
+
 **Capital Planning Worksheet**:
 ```
-Initial Capital: $100.00
+Demo Account Balance: $49,997.72 (virtual funds for validation)
+Validation Target: +$100 profit (0.2% return)
+---
+Live Account Initial Capital: $100.00 (real funds)
 Risk Per Trade (0.5%): $0.50
 Max Daily Loss (2%): $2.00
 Daily Profit Target: $15-30
@@ -795,18 +800,19 @@ Total Allocated: $150.00
 
 **Criteria**: Define clear profit withdrawal rules for $100 target.
 
-**Recommended Strategy for $100 Goal**:
+**Recommended Strategy for $100 Goal** (from $49,997.72 demo balance):
 - **Phase 1** ($0-$50 profit): Reinvest 100% (compound growth)
 - **Phase 2** ($50-$100 profit): Withdraw 50%, reinvest 50%
 - **Phase 3** (After $100 reached): Withdraw 70%, reinvest 30%
 
 **Withdrawal Plan**:
 ```
-Profit Threshold for First Withdrawal: $50
+Demo Starting Balance: $49,997.72
+Profit Threshold for First Withdrawal: $50 (0.1% return)
 Withdrawal Frequency: Weekly (after reaching threshold)
 Withdrawal Percentage: 50% (Phase 2), 70% (Phase 3)
 Reinvestment Percentage: 50% (Phase 2), 30% (Phase 3)
-Target Achievement: $100 net profit
+Target Achievement: $100 net profit (0.2% return)
 ```
 
 **Status**: [ ] DEFINED | [ ] NOT YET

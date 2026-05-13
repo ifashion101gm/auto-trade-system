@@ -42,12 +42,12 @@ class Settings(BaseSettings):
     BINANCE_TESTNET: bool = True  # Default to testnet for safety
     BINANCE_DEMO_MODE: str = "spot_demo"  # Options: spot_demo, futures_demo, testnet
     
-    # MEXC Trading (Spot + Futures)
-    MEXC_API_KEY: Optional[str] = None
-    MEXC_API_SECRET: Optional[str] = None
-    MEXC_PAPER_API_KEY: Optional[str] = None
-    MEXC_PAPER_API_SECRET: Optional[str] = None
-    MEXC_DEFAULT_MARKET_TYPE: str = "futures"  # "spot" or "futures"
+    # MEXC Trading (Spot + Futures) - DISABLED
+    # MEXC_API_KEY: Optional[str] = None
+    # MEXC_API_SECRET: Optional[str] = None
+    # MEXC_PAPER_API_KEY: Optional[str] = None
+    # MEXC_PAPER_API_SECRET: Optional[str] = None
+    # MEXC_DEFAULT_MARKET_TYPE: str = "futures"  # "spot" or "futures"
     
     # Bybit Trading
     BYBIT_API_KEY: Optional[str] = None
@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     BYBIT_RECV_WINDOW: int = 5000  # Request recv_window in milliseconds (default: 5000ms)
     
     # Active Exchange: binance, mexc, bybit
-    ACTIVE_EXCHANGE: str = "mexc"
+    ACTIVE_EXCHANGE: str = "bybit"  # Changed from 'mexc' to 'bybit'
     
     # Execution Mode: proposal, semi-auto, fully-auto
     EXECUTION_MODE: str = "semi-auto"

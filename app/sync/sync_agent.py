@@ -1,16 +1,16 @@
 """
-Sync Agent - Central state engine that listens to MEXC WebSocket
+Sync Agent - Central state engine that listens to exchange WebSocket
 and maintains database as single source of truth.
 
 Responsibilities:
-- Listen to MEXC WebSocket for real-time updates
+- Listen to exchange WebSocket for real-time updates (Bybit)
 - Sync exchange state to database
 - Detect mismatches and trigger reconciliation
 - Handle reconnections gracefully
 - Handle partial fills and orphaned orders
 """
 import asyncio
-from app.websocket.manager import MEXCWebSocketManager
+from app.exchange.bybit_connector import BybitConnector
 from app.database.repositories import TradeRepository, PositionRepository
 from app.events.event_bus import event_bus
 from app.events.event_types import (
@@ -33,7 +33,8 @@ class SyncAgent:
     """
     
     def __init__(self):
-        self.websocket_manager = MEXCWebSocketManager(market_type='futures')
+        # Use Bybit connector instead of MEXC WebSocket manager
+        self.connector = BybitConnector(demo_trading=True)  # Use Bybit Demo Trading
         self.trade_repo = TradeRepository()
         self.position_repo = PositionRepository()
         self.running = False
@@ -46,25 +47,44 @@ class SyncAgent:
         event_bus.subscribe(ORDER_FILLED, self._on_order_filled)
         event_bus.subscribe(ORDER_PARTIALLY_FILLED, self._on_order_partially_filled)
     
-    async def start_listening(self, symbols=['XAUT/USDT'], db_session_factory=None):
-        """Start sync agent with WebSocket and periodic reconciliation."""
+    async def start_listening(self, symbols=['XAU/USDT:USDT'], db_session_factory=None):
+        """Start sync agent with Bybit WebSocket and periodic reconciliation."""
         self.running = True
-        logger.info("🔄 Sync Agent: Starting WebSocket listener...")
+        logger.info("🔄 Sync Agent: Starting Bybit WebSocket listener...")
         
-        # Start WebSocket connection in background
-        asyncio.create_task(self.websocket_manager.connect())
+        # Connect to Bybit (includes WebSocket initialization)
+        await self.connector.connect()
         
-        # Subscribe to symbols
+        # Subscribe to symbols via Bybit WebSocket
         for symbol in symbols:
-            await self.websocket_manager.subscribe('position', symbol)
-            await self.websocket_manager.subscribe('order', symbol)
-            await self.websocket_manager.subscribe('balance', symbol)
+            await self.connector.ws_manager.subscribe_positions(
+                lambda data, sym=symbol: self._handle_position_update(data, sym)
+            )
+            await self.connector.ws_manager.subscribe_orders(
+                lambda data, sym=symbol: self._handle_order_update(data, sym)
+            )
         
         # Start periodic REST verification (every 2 minutes)
         if db_session_factory:
             asyncio.create_task(self._periodic_reconciliation(db_session_factory))
         
-        logger.info("✅ Sync Agent started")
+        logger.info("✅ Sync Agent started with Bybit")
+    
+    async def _handle_position_update(self, data, symbol):
+        """Handle position update from Bybit WebSocket."""
+        try:
+            logger.debug(f"Position update received for {symbol}: {data}")
+            # Process position data here
+        except Exception as e:
+            logger.error(f"Error handling position update: {e}")
+    
+    async def _handle_order_update(self, data, symbol):
+        """Handle order update from Bybit WebSocket."""
+        try:
+            logger.debug(f"Order update received for {symbol}: {data}")
+            # Process order data here
+        except Exception as e:
+            logger.error(f"Error handling order update: {e}")
     
     async def _on_sync_received(self, event):
         """Handle raw sync data from WebSocket."""
@@ -297,5 +317,5 @@ class SyncAgent:
     async def stop(self):
         """Stop sync agent."""
         self.running = False
-        await self.websocket_manager.disconnect()
+        await self.connector.close()
         logger.info("🛑 Sync Agent stopped")

@@ -5,6 +5,9 @@ Prevents ghost trades, duplicated positions, and close failures.
 
 This runs every 5 seconds to ensure DB matches exchange reality.
 Also listens to WebSocket reconnection events for immediate sync.
+
+NOTE: Currently configured to use Bybit Demo Trading exclusively.
+MEXC integration has been disabled.
 """
 import asyncio
 import logging
@@ -42,13 +45,15 @@ class PositionSyncService:
         Args:
             testnet: Sync from testnet or live exchange (unused for Bybit demo)
         """
-        # Use Bybit Demo Trading connector
-        self.executor = BybitConnector(demo_trading=True)
+        # Use Bybit Demo Trading connector exclusively
+        self.executor = BybitConnector(demo_trading=True)  # Force demo trading mode
         self.trade_repo = TradeRepository()
         self.position_repo = PositionRepository()
         self.testnet = testnet
         self._running = False
         self._sync_interval = 5  # seconds
+        
+        logger.info("✅ PositionSyncService initialized with Bybit Demo Trading")
         
         # Subscribe to WebSocket reconnection events for immediate sync
         event_bus.subscribe(WEBSOCKET_RECONNECTED, self._on_websocket_reconnected)
