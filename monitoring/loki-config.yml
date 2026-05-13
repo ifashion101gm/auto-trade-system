@@ -30,6 +30,8 @@ storage_config:
     cache_location: /loki/boltdb-shipper-cache
     cache_ttl: 24h
     shared_store: filesystem
+  filesystem:
+    directory: /loki/chunks
 
 limits_config:
   reject_old_samples: true

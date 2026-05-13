@@ -17,7 +17,9 @@ class ExchangeRouter:
     """
     
     def __init__(self):
-        self.live_exchange = BybitConnector(demo_trading=False)
+        # Use Bybit Demo Trading for both live and demo modes
+        # Both will use api-demo.bybit.com with demo API keys
+        self.live_exchange = BybitConnector(demo_trading=True)
         self.demo_exchange = BybitConnector(demo_trading=True)
     
     def get_exchange(self, mode: str = None):

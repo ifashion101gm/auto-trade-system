@@ -12,7 +12,7 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.exchange.mexc_executor import MexcExecutor
+from app.exchange.bybit_connector import BybitConnector
 from app.database.repositories import TradeRepository, PositionRepository
 from app.events.event_bus import event_bus
 from app.events.event_types import SYNC_MISMATCH, SYNC_REPAIRED, WEBSOCKET_RECONNECTED
@@ -40,9 +40,10 @@ class PositionSyncService:
         Initialize position sync service.
         
         Args:
-            testnet: Sync from testnet or live exchange
+            testnet: Sync from testnet or live exchange (unused for Bybit demo)
         """
-        self.executor = MexcExecutor(testnet=testnet)
+        # Use Bybit Demo Trading connector
+        self.executor = BybitConnector(demo_trading=True)
         self.trade_repo = TradeRepository()
         self.position_repo = PositionRepository()
         self.testnet = testnet
@@ -54,7 +55,7 @@ class PositionSyncService:
     
     async def start(self, db_session_factory):
         """
-        Start continuous position synchronization.
+        Start continuous position synchronization with graceful degradation.
         
         Args:
             db_session_factory: Async session factory for database access
@@ -62,16 +63,43 @@ class PositionSyncService:
         self._running = True
         logger.info(f"🔄 Position sync started (interval={self._sync_interval}s, testnet={self.testnet})")
         
+        consecutive_db_failures = 0
+        max_consecutive_failures = 5  # After this many failures, reduce sync frequency
+        
         while self._running:
             try:
                 async with db_session_factory() as db_session:
                     await self.sync_once(db_session)
+                    # Reset failure counter on success
+                    consecutive_db_failures = 0
                 
+                # Normal sync interval
                 await asyncio.sleep(self._sync_interval)
                 
             except Exception as e:
-                logger.error(f"❌ Position sync error: {e}")
-                await asyncio.sleep(self._sync_interval)
+                error_str = str(e).lower()
+                is_db_connection_error = 'errno 111' in error_str or 'connection refused' in error_str or 'database' in error_str
+                
+                if is_db_connection_error:
+                    consecutive_db_failures += 1
+                    logger.warning(
+                        f"⚠️  Database connection issue during sync (failure {consecutive_db_failures}): {e}"
+                    )
+                    
+                    # Graceful degradation: reduce sync frequency when DB is unavailable
+                    if consecutive_db_failures >= max_consecutive_failures:
+                        degraded_interval = self._sync_interval * 6  # Sync every 30s instead of 5s
+                        logger.warning(
+                            f"🔧 Entering degraded mode - reducing sync frequency to {degraded_interval}s "
+                            f"due to persistent database issues"
+                        )
+                        await asyncio.sleep(degraded_interval)
+                    else:
+                        await asyncio.sleep(self._sync_interval)
+                else:
+                    # Non-DB errors - log and continue normally
+                    logger.error(f"❌ Position sync error: {e}")
+                    await asyncio.sleep(self._sync_interval)
     
     def stop(self):
         """Stop position synchronization."""
@@ -83,6 +111,7 @@ class PositionSyncService:
         Handle WebSocket reconnection by triggering immediate sync.
         
         This ensures we catch any state changes that occurred during disconnection.
+        Gracefully handles database connection failures.
         
         Args:
             event: WebSocket reconnection event with metadata
@@ -98,7 +127,16 @@ class PositionSyncService:
             
             logger.info("✅ Immediate sync completed after WebSocket reconnect")
         except Exception as e:
-            logger.error(f"❌ Failed to sync after WebSocket reconnect: {e}")
+            error_str = str(e).lower()
+            is_db_error = 'errno 111' in error_str or 'connection refused' in error_str or 'database' in error_str
+            
+            if is_db_error:
+                logger.warning(
+                    f"⚠️  Skipping immediate sync after WebSocket reconnect due to DB issue: {e}"
+                )
+                logger.info("   → Will sync on next scheduled cycle when DB is available")
+            else:
+                logger.error(f"❌ Failed to sync after WebSocket reconnect: {e}")
     
     async def sync_once(self, db_session: AsyncSession):
         """
@@ -112,13 +150,43 @@ class PositionSyncService:
         """
         logger.debug("🔄 Running position sync cycle...")
         
-        # Step 1: Get exchange positions
+        # Step 1: Get exchange positions with error handling
         try:
             exchange_positions = await self.executor.get_open_positions()
+            
+            # Validate position data before processing
+            validated_positions = []
+            for pos in exchange_positions:
+                try:
+                    # Ensure all required fields are present and valid
+                    symbol = pos.get('symbol', '')
+                    if not symbol:
+                        logger.warning(f"Skipping position with no symbol: {pos}")
+                        continue
+                    
+                    size = float(pos.get('size', 0) or 0)
+                    entry_price = float(pos.get('entry_price', 0) or 0)
+                    mark_price = float(pos.get('mark_price', 0) or 0)
+                    unrealized_pnl = float(pos.get('unrealized_pnl', 0) or 0)
+                    
+                    validated_positions.append({
+                        'symbol': symbol,
+                        'size': size,
+                        'entry_price': entry_price,
+                        'mark_price': mark_price,
+                        'unrealized_pnl': unrealized_pnl,
+                        'leverage': int(pos.get('leverage', 1) or 1),
+                        'liquidation_price': float(pos.get('liquidation_price', 0) or 0)
+                    })
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Invalid position data skipped: {pos} - Error: {e}")
+                    continue
+            
+            exchange_positions = validated_positions
             exchange_symbols = {pos['symbol'] for pos in exchange_positions}
             logger.debug(f"Exchange positions: {len(exchange_positions)} ({exchange_symbols})")
         except Exception as e:
-            logger.error(f"Failed to fetch exchange positions: {e}")
+            logger.error(f"Failed to fetch exchange positions: {type(e).__name__}: {e}")
             return
         
         # Step 2: Get database positions

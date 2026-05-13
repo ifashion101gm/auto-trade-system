@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Cleanup and Restart Procedure for MEXC Paper Trading Validation Cycle.
+Cleanup and Restart Procedure for Bybit Demo Trading Validation Cycle.
 
 This script:
-1. Closes all open MEXC paper trades (XAUT/USDT)
+1. Closes all open Bybit Demo paper trades (XAU/USDT)
 2. Sends closure reports via Telegram
 3. Resets validation state
 4. Initiates a new validation cycle
 5. Sends new trade report
 
 Usage:
-    python scripts/cleanup_and_restart_mexc_cycle.py
+    python scripts/cleanup_and_restart_bybit_demo_cycle.py
 """
 import asyncio
 import sys
@@ -36,14 +36,16 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 
 
-class MexcCycleManager:
-    """Manages the cleanup and restart of MEXC paper trading cycles."""
+class BybitDemoCycleManager:
+    """Manages the cleanup and restart of Bybit Demo trading cycles."""
     
     def __init__(self):
         self.notifier = TelegramNotifier()
+        # For Bybit Demo, we use demo_trading=True which routes to api-demo.bybit.com
+        # The exchange manager will use BYBIT_DEMO_API_KEY/SECRET when demo_trading is enabled
         self.exchange_manager = UnifiedExchangeManager(
-            exchange_name="mexc",
-            use_testnet=False  # MEXC Demo Futures doesn't use testnet flag
+            exchange_name="bybit",
+            use_testnet=False  # Bybit Demo doesn't use testnet flag
         )
         self.user_id = "default_user"
         
@@ -53,36 +55,36 @@ class MexcCycleManager:
     
     async def step1_close_open_trades(self) -> List[Dict[str, Any]]:
         """
-        Step 1: Identify and close all open MEXC paper trades.
+        Step 1: Identify and close all open Bybit Demo paper trades.
         
         Returns:
             List of closed trade details
         """
         logger.info("\n" + "="*80)
-        logger.info("STEP 1: Closing Open MEXC Paper Trades")
+        logger.info("STEP 1: Closing Open Bybit Demo Paper Trades")
         logger.info("="*80)
         
         closed_trades = []
         
         async with async_session_maker() as db_session:
-            # Query open MEXC trades for Gold symbols (various formats)
-            gold_symbols = ['XAUT/USDT', 'PAXG/USDT', 'GOLD(XAUT)USDT', 'GOLDUSDT']
+            # Query open Bybit trades for Gold symbol
+            gold_symbol = settings.GOLD_SYMBOL_BYBIT  # XAU/USDT:USDT
             
             stmt = select(PaperTrades).where(
                 PaperTrades.user_id == self.user_id,
-                PaperTrades.exchange == "mexc",
+                PaperTrades.exchange == "bybit",
                 PaperTrades.status == "open",
-                PaperTrades.symbol.in_(gold_symbols)
+                PaperTrades.symbol == gold_symbol
             ).order_by(PaperTrades.ts_open)
             
             result = await db_session.execute(stmt)
             open_trades = result.scalars().all()
             
             if not open_trades:
-                logger.info("✅ No open MEXC paper trades found")
+                logger.info("✅ No open Bybit Demo paper trades found")
                 return closed_trades
             
-            logger.info(f"📊 Found {len(open_trades)} open MEXC trade(s)")
+            logger.info(f"📊 Found {len(open_trades)} open Bybit Demo trade(s)")
             
             for trade in open_trades:
                 try:
@@ -197,7 +199,7 @@ class MexcCycleManager:
             # Check for any remaining open trades
             stmt = select(func.count(PaperTrades.id)).where(
                 PaperTrades.user_id == self.user_id,
-                PaperTrades.exchange == "mexc",
+                PaperTrades.exchange == "bybit",
                 PaperTrades.status == "open"
             )
             
@@ -210,20 +212,20 @@ class MexcCycleManager:
                 # Get summary statistics
                 stmt_total = select(func.count(PaperTrades.id)).where(
                     PaperTrades.user_id == self.user_id,
-                    PaperTrades.exchange == "mexc"
+                    PaperTrades.exchange == "bybit"
                 )
                 result_total = await db_session.execute(stmt_total)
                 total_trades = result_total.scalar() or 0
                 
                 stmt_closed = select(func.count(PaperTrades.id)).where(
                     PaperTrades.user_id == self.user_id,
-                    PaperTrades.exchange == "mexc",
+                    PaperTrades.exchange == "bybit",
                     PaperTrades.status == "closed"
                 )
                 result_closed = await db_session.execute(stmt_closed)
                 closed_trades = result_closed.scalar() or 0
                 
-                logger.info(f"   📊 Total MEXC trades: {total_trades}")
+                logger.info(f"   📊 Total Bybit Demo trades: {total_trades}")
                 logger.info(f"   📊 Closed trades: {closed_trades}")
                 logger.info(f"   📊 Open trades: {open_count}")
                 
@@ -244,15 +246,17 @@ class MexcCycleManager:
         logger.info("="*80)
         
         try:
-            # Initialize live trading service for MEXC
+            # Initialize live trading service for Bybit Demo
+            # Note: For Bybit Demo, we need to pass demo_trading flag
+            # The LiveTradingService uses UnifiedExchangeManager which checks BYBIT_USE_DEMO_DOMAIN
             trading_service = LiveTradingService(
-                exchange_name="mexc",
-                use_testnet=False,
+                exchange_name="bybit",
+                use_testnet=False,  # Bybit Demo doesn't use testnet
                 use_openrouter=True
             )
             
             # Execute trading cycle for Gold
-            symbol = settings.GOLD_SYMBOL_MEXC  # XAUT/USDT
+            symbol = settings.GOLD_SYMBOL_BYBIT  # XAU/USDT:USDT
             
             logger.info(f"🚀 Starting new trading cycle for {symbol}...")
             
@@ -344,7 +348,7 @@ class MexcCycleManager:
             
             # Use the deduplication-aware method
             sent = await self.notifier.send_trade_rejection_report(
-                symbol=settings.GOLD_SYMBOL_MEXC,
+                symbol=settings.GOLD_SYMBOL_BYBIT,
                 reason=reason,
                 quality_score=quality_score,
                 cycle_time_ms=cycle_time
@@ -427,12 +431,12 @@ class MexcCycleManager:
     async def run_full_procedure(self):
         """Execute the complete cleanup and restart procedure."""
         logger.info("\n" + "#"*80)
-        logger.info("# MEXC PAPER TRADING VALIDATION CYCLE - CLEANUP & RESTART")
+        logger.info("# BYBIT DEMO TRADING VALIDATION CYCLE - CLEANUP & RESTART")
         logger.info("#"*80)
         logger.info(f"Started at: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}")
         logger.info(f"User ID: {self.user_id}")
-        logger.info(f"Exchange: MEXC (Demo Futures)")
-        logger.info(f"Symbol: {settings.GOLD_SYMBOL_MEXC}")
+        logger.info(f"Exchange: Bybit Demo (api-demo.bybit.com)")
+        logger.info(f"Symbol: {settings.GOLD_SYMBOL_BYBIT}")
         
         try:
             # Step 1: Close open trades
@@ -486,7 +490,7 @@ class MexcCycleManager:
 
 async def main():
     """Main entry point."""
-    manager = MexcCycleManager()
+    manager = BybitDemoCycleManager()
     success = await manager.run_full_procedure()
     
     if success:

@@ -1,25 +1,51 @@
 version: '3.8'
 
+# =============================================================================
+# SECURITY WARNING
+# =============================================================================
+# This file uses environment variables for sensitive credentials.
+# NEVER hardcode passwords in this file!
+#
+# Before running:
+# 1. Copy .env.example to .env
+# 2. Set DB_PASSWORD and GRAFANA_PASSWORD to strong, unique values
+# 3. NEVER commit .env to version control
+# =============================================================================
+
 services:
   postgres:
     image: postgres:15-alpine
     container_name: trading-postgres
     environment:
-      POSTGRES_USER: trading
-      POSTGRES_PASSWORD: trading123
-      POSTGRES_DB: vmassit
+      POSTGRES_USER: ${DB_USER:-trading}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Database password required}
+      POSTGRES_DB: ${DB_NAME:-vmassit}
+      # PostgreSQL configuration for better connection handling
+      POSTGRES_MAX_CONNECTIONS: "100"
+      POSTGRES_SHARED_BUFFERS: "256MB"
+      POSTGRES_EFFECTIVE_CACHE_SIZE: "768MB"
+      POSTGRES_WORK_MEM: "4MB"
+      POSTGRES_MAINTENANCE_WORK_MEM: "64MB"
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U trading"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-trading} -d ${DB_NAME:-vmassit}"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s  # Give PostgreSQL time to initialize
     restart: unless-stopped
     networks:
       - trading-network
+    # Ensure PostgreSQL listens on all interfaces
+    command:
+      - "postgres"
+      - "-c"
+      - "listen_addresses=*"
+      - "-c"
+      - "max_connections=100"
 
   redis:
     image: redis:7-alpine
@@ -62,7 +88,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
       GF_INSTALL_PLUGINS: ""
     volumes:
       - grafana-data:/var/lib/grafana

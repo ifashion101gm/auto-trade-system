@@ -28,6 +28,46 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def calculate_exponential_backoff(
+    attempt: int,
+    base_delay: float = 5.0,
+    max_delay: float = 300.0,
+    jitter_factor: float = 0.1
+) -> float:
+    """
+    Calculate exponential backoff delay with jitter.
+    
+    This utility function implements the Hummingbot pattern for reliable
+    reconnection with randomized delays to prevent thundering herd problems.
+    
+    Args:
+        attempt: Current reconnection attempt number (1-based)
+        base_delay: Initial delay in seconds (default: 5.0)
+        max_delay: Maximum delay cap in seconds (default: 300.0)
+        jitter_factor: Jitter percentage as decimal (default: 0.1 = 10%)
+    
+    Returns:
+        Calculated delay with exponential backoff and jitter applied
+    
+    Example:
+        >>> calculate_exponential_backoff(1, base_delay=5.0, jitter_factor=0.1)
+        5.5  # ~5.0 + 10% jitter
+        >>> calculate_exponential_backoff(3, base_delay=5.0, jitter_factor=0.1)
+        44.0  # ~40.0 + 10% jitter
+    """
+    # Exponential backoff: base_delay * 2^(attempt-1)
+    exponential_delay = base_delay * (2 ** (attempt - 1))
+    
+    # Cap at maximum delay
+    capped_delay = min(exponential_delay, max_delay)
+    
+    # Add jitter (random variation to prevent synchronized retries)
+    jitter = capped_delay * jitter_factor * random.random()
+    delay_with_jitter = capped_delay + jitter
+    
+    return delay_with_jitter
+
+
 class MEXCWebSocketManager:
     """
     Manages MEXC WebSocket connections for real-time updates.
@@ -155,8 +195,11 @@ class MEXCWebSocketManager:
                     'message': 'WebSocket reconnected successfully',
                     'attempt_count': old_attempts,
                     'downtime_seconds': round(self._total_downtime_seconds, 2),
-                    'uptime_seconds': round(time.time() - self._connected_since, 2)
+                    'uptime_seconds': round(time.time() - self._connected_since, 2),
+                    'subscriptions_restored': len(self.subscriptions)
                 })
+                
+                logger.info(f"✅ WebSocket ready with {len(self.subscriptions)} active subscriptions")
                 
                 # Start listening for messages
                 await self._listen()
@@ -179,6 +222,15 @@ class MEXCWebSocketManager:
             except ConnectionRefusedError as e:
                 logger.error(f"❌ Connection REFUSED: {e}")
                 logger.error(f"   Check firewall settings and network connectivity")
+                await self._handle_reconnect()
+            except OSError as e:
+                # Handle network-level errors (errno 104, 111, etc.)
+                logger.error(f"❌ Network error: {type(e).__name__}: {e}")
+                logger.error(f"   Errno: {e.errno if hasattr(e, 'errno') else 'N/A'}")
+                if e.errno == 104:
+                    logger.error(f"   Connection reset by peer - server dropped connection")
+                elif e.errno == 111:
+                    logger.error(f"   Connection refused - service not available")
                 await self._handle_reconnect()
             except Exception as e:
                 logger.error(f"❌ WebSocket error: {type(e).__name__}: {e}")
@@ -349,15 +401,40 @@ class MEXCWebSocketManager:
                 except Exception as e:
                     logger.error(f"Failed to send Telegram alert: {e}")
         
-        # Calculate delay with exponential backoff
-        delay = min(
+        # Calculate delay using extracted utility function
+        delay_with_jitter = calculate_exponential_backoff(
+            attempt=self.reconnect_attempts,
+            base_delay=self.base_reconnect_delay,
+            max_delay=self.max_reconnect_delay,
+            jitter_factor=self.jitter_factor
+        )
+        
+        # Reset backoff after extended failure period to avoid permanent high delays
+        # If we've been retrying for more than 1 hour, reset the backoff counter
+        if self.reconnect_attempts > 10:
+            total_retry_time = sum(
+                min(self.base_reconnect_delay * (2 ** i), self.max_reconnect_delay)
+                for i in range(self.reconnect_attempts - 1)
+            )
+            reset_threshold = 3600  # 1 hour
+            if total_retry_time > reset_threshold:
+                logger.warning(
+                    f"⚠️  Extended retry period detected ({total_retry_time:.0f}s). "
+                    f"Resetting backoff counter to prevent permanent high delays."
+                )
+                self.reconnect_attempts = 1
+                delay_with_jitter = calculate_exponential_backoff(
+                    attempt=1,
+                    base_delay=self.base_reconnect_delay,
+                    max_delay=self.max_reconnect_delay,
+                    jitter_factor=self.jitter_factor
+                )
+        
+        # Calculate jitter for logging
+        jitter = delay_with_jitter - min(
             self.base_reconnect_delay * (2 ** (self.reconnect_attempts - 1)),
             self.max_reconnect_delay
         )
-        
-        # Add jitter to prevent thundering herd (Hummingbot pattern)
-        jitter = delay * self.jitter_factor * random.random()
-        delay_with_jitter = delay + jitter
         
         # Enhanced logging for debugging
         logger.warning(
@@ -366,10 +443,11 @@ class MEXCWebSocketManager:
             f"{'='*60}\n"
             f"Reconnect attempt #{self.reconnect_attempts}\n"
             f"Base delay: {self.base_reconnect_delay}s\n"
-            f"Calculated delay: {delay:.1f}s (capped at {self.max_reconnect_delay}s)\n"
+            f"Calculated delay: {delay_with_jitter:.1f}s (capped at {self.max_reconnect_delay}s)\n"
             f"Jitter: {jitter:.1f}s ({self.jitter_factor*100:.0f}%)\n"
             f"Next retry in: {delay_with_jitter:.1f}s\n"
             f"Total disconnects so far: {self._disconnect_count}\n"
+            f"Subscriptions to restore: {len(self.subscriptions)}\n"
             f"Circuit breaker: {'ACTIVE 🚨' if self.circuit_breaker_active else 'inactive'}\n"
             f"{'='*60}"
         )
@@ -380,22 +458,42 @@ class MEXCWebSocketManager:
             'attempt_count': self.reconnect_attempts,
             'max_attempts': self.max_reconnect_attempts if self.max_reconnect_attempts > 0 else 'unlimited',
             'total_disconnects': self._disconnect_count,
+            'subscriptions_to_restore': len(self.subscriptions),
             'circuit_breaker_active': self.circuit_breaker_active
         })
         
         await asyncio.sleep(delay_with_jitter)
     
     async def _resubscribe(self):
-        """Resubscribe to all channels after reconnect."""
+        """Resubscribe to all channels after reconnect with verification."""
         if not self.websocket:
+            logger.warning("Cannot resubscribe: WebSocket not connected")
             return
+        
+        if not self.subscriptions:
+            logger.info("No subscriptions to restore")
+            return
+        
+        logger.info(f"🔄 Resubscribing to {len(self.subscriptions)} channels...")
+        successful = 0
+        failed = 0
         
         for subscription in self.subscriptions:
             try:
                 await self.websocket.send(json.dumps(subscription))
-                logger.debug(f"Resubscribed to {subscription['params']}")
+                params = subscription.get('params', [])
+                logger.debug(f"✅ Resubscribed to {params}")
+                successful += 1
+                # Small delay between subscriptions to avoid overwhelming the server
+                await asyncio.sleep(0.1)
             except Exception as e:
-                logger.error(f"Failed to resubscribe: {e}")
+                logger.error(f"❌ Failed to resubscribe to {subscription.get('params')}: {e}")
+                failed += 1
+        
+        logger.info(f"✅ Resubscription complete: {successful} successful, {failed} failed")
+        
+        if failed > 0:
+            logger.warning(f"⚠️  {failed} subscriptions failed - will retry on next reconnect")
     
     async def _monitor_heartbeat(self):
         """Monitor WebSocket connection health via heartbeat (Hummingbot pattern)."""
@@ -535,3 +633,44 @@ class MEXCWebSocketManager:
             f"(total_disconnects={self._disconnect_count}, "
             f"total_downtime={self._total_downtime_seconds:.1f}s)"
         )
+    
+    async def verify_connection_health(self) -> Dict[str, Any]:
+        """
+        Verify WebSocket connection health and state consistency.
+        
+        Returns:
+            Dictionary with health check results
+        """
+        health_status = {
+            'connected': self.websocket is not None,
+            'subscriptions_count': len(self.subscriptions),
+            'reconnect_attempts': self.reconnect_attempts,
+            'circuit_breaker_active': self.circuit_breaker_active,
+            'last_message_age_s': (
+                round(time.time() - self.last_message_time, 2)
+                if self.last_message_time else None
+            ),
+            'issues': []
+        }
+        
+        # Check for potential issues
+        if not self.websocket:
+            health_status['issues'].append('WebSocket not connected')
+        
+        if self.circuit_breaker_active:
+            health_status['issues'].append('Circuit breaker is active')
+        
+        if self.reconnect_attempts > 5:
+            health_status['issues'].append(f'High reconnect attempts: {self.reconnect_attempts}')
+        
+        if self.last_message_time and (time.time() - self.last_message_time) > self.stale_stream_threshold:
+            health_status['issues'].append('Stale stream detected - no recent messages')
+        
+        if not self.subscriptions:
+            health_status['issues'].append('No active subscriptions')
+        
+        health_status['healthy'] = len(health_status['issues']) == 0
+        
+        return health_status
+    
+

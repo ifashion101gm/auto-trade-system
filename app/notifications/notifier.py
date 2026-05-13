@@ -168,7 +168,130 @@ class TelegramNotifier:
 <b>Metadata:</b>
 • Time: {trade_data.get('timestamp', 'Now')}
 • Exchange: {exchange}
-        """.strip()
+        ".strip()
+        
+        return await self.send_message(message)
+    
+    async def trade_opened(self, order_details: Dict[str, Any]) -> bool:
+        """
+        Send notification when a trade position is successfully opened.
+        
+        This is a semantic wrapper around send_trade_entry with standardized
+        field extraction and formatting for position opening events.
+        
+        Args:
+            order_details: Dictionary containing:
+                - order_id: Exchange order ID
+                - symbol: Trading pair (e.g., 'BTC/USDT')
+                - side: 'buy' or 'sell' (or 'long'/'short')
+                - price: Fill price
+                - quantity: Position size
+                - leverage: Leverage multiplier (futures)
+                - timestamp: Execution time
+                - exchange: Exchange name
+                - status: Order status ('filled', 'partially_filled')
+                
+        Returns:
+            True if notification sent successfully
+        """
+        # Normalize fields
+        symbol = order_details.get('symbol', 'UNKNOWN')
+        side = order_details.get('side', 'UNKNOWN').upper()
+        price = order_details.get('price', order_details.get('fill_price', 0))
+        quantity = order_details.get('quantity', order_details.get('amount', 0))
+        order_id = order_details.get('order_id', 'N/A')
+        exchange = order_details.get('exchange', 'Unknown')
+        status = order_details.get('status', 'filled')
+        timestamp = order_details.get('timestamp', datetime.utcnow().isoformat())
+        
+        # Determine emoji based on side
+        emoji = "🟢" if side in ['BUY', 'LONG'] else "🔴"
+        
+        message = (
+            f"\n"
+            f"<b>{emoji} TRADE OPENED on {exchange.upper()}</b>\n"
+            f"\n"
+            f"<b>Order ID:</b> <code>{order_id}</code>\n"
+            f"<b>Symbol:</b> {symbol}\n"
+            f"<b>Side:</b> {side}\n"
+            f"<b>Price:</b> ${price:,.2f}\n"
+            f"<b>Quantity:</b> {quantity}\n"
+            f"<b>Status:</b> {status.upper()}\n"
+            f"\n"
+            f"<b>Time:</b> {timestamp}\n"
+        ).strip()
+        
+        return await self.send_message(message)
+    
+    async def trade_closed(self, order_details: Dict[str, Any], pnl: float) -> bool:
+        """
+        Send notification when a trade position is closed with P&L summary.
+        
+        This is a semantic wrapper around send_trade_exit focused on position
+        closure events with explicit P&L reporting.
+        
+        Args:
+            order_details: Dictionary containing:
+                - order_id: Closing order ID
+                - symbol: Trading pair
+                - side: Original position side ('buy'/'sell' or 'long'/'short')
+                - entry_price: Original entry price
+                - exit_price: Closing fill price
+                - quantity: Position size closed
+                - duration: Position hold time (optional)
+                - reason: Close reason ('take_profit', 'stop_loss', 'manual')
+                - exchange: Exchange name
+                
+            pnl: Profit/Loss amount (positive = profit, negative = loss)
+            
+        Returns:
+            True if notification sent successfully
+        """
+        symbol = order_details.get('symbol', 'UNKNOWN')
+        side = order_details.get('side', 'UNKNOWN').upper()
+        entry_price = order_details.get('entry_price', 0)
+        exit_price = order_details.get('exit_price', order_details.get('price', 0))
+        quantity = order_details.get('quantity', order_details.get('amount', 0))
+        order_id = order_details.get('order_id', 'N/A')
+        exchange = order_details.get('exchange', 'Unknown')
+        reason = order_details.get('reason', 'closed')
+        duration = order_details.get('duration', 'N/A')
+        
+        # Calculate P&L percentage if we have entry/exit prices
+        if entry_price > 0:
+            pnl_pct = (pnl / (entry_price * quantity)) * 100
+        else:
+            pnl_pct = 0
+        
+        # Determine emoji and result text
+        if pnl > 0:
+            emoji = "✅"
+            result_text = "PROFIT"
+        elif pnl < 0:
+            emoji = "❌"
+            result_text = "LOSS"
+        else:
+            emoji = "➖"
+            result_text = "BREAKEVEN"
+        
+        message = (
+            f"\n"
+            f"<b>{emoji} TRADE CLOSED - {result_text}</b>\n"
+            f"\n"
+            f"<b>Order ID:</b> <code>{order_id}</code>\n"
+            f"<b>Symbol:</b> {symbol}\n"
+            f"<b>Side:</b> {side}\n"
+            f"<b>Entry:</b> ${entry_price:,.2f}\n"
+            f"<b>Exit:</b> ${exit_price:,.2f}\n"
+            f"\n"
+            f"<b>P&L Summary:</b>\n"
+            f"• Amount: ${pnl:+.2f}\n"
+            f"• Return: {pnl_pct:+.2f}%\n"
+            f"• Reason: {reason.replace('_', ' ').title()}\n"
+            f"\n"
+            f"<b>Duration:</b> {duration}\n"
+            f"<b>Exchange:</b> {exchange}\n"
+        ).strip()
         
         return await self.send_message(message)
     

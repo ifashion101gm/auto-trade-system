@@ -2,6 +2,19 @@
 Abstract base class for all exchange implementations.
 Ensures consistent interface across LIVE and DEMO modes.
 Follows CCXT unified API standards for exchange abstraction.
+
+ERROR HANDLING CONTRACT:
+All subclasses MUST implement:
+- handle_api_error(): Standardized error processing
+- is_retryable_error(): Retry decision logic  
+- classify_error(): Error categorization
+
+Common error patterns to handle:
+- Network timeouts (httpx.TimeoutException, asyncio.TimeoutError)
+- Rate limits (HTTP 429, exchange-specific rate limit errors)
+- Authentication failures (HTTP 401/403, invalid signature)
+- Validation errors (HTTP 400/422, invalid parameters)
+- Server errors (HTTP 5xx, exchange maintenance)
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
@@ -178,4 +191,71 @@ class BaseExchange(ABC):
     @abstractmethod
     async def close(self):
         """Close exchange connection gracefully."""
+        pass
+    
+    # =========================================================================
+    # Error Handling Methods (Required by all subclasses)
+    # =========================================================================
+    
+    @abstractmethod
+    def handle_api_error(self, error: Exception) -> Dict[str, Any]:
+        """
+        Handle API errors consistently across exchanges.
+        
+        Args:
+            error: The exception raised during API call
+            
+        Returns:
+            Dictionary with error classification:
+            - 'type': 'network' | 'auth' | 'rate_limit' | 'validation' | 'server'
+            - 'retryable': bool
+            - 'message': str (user-friendly message)
+            - 'original_error': Exception
+        """
+        pass
+    
+    @abstractmethod
+    def is_retryable_error(self, error: Exception) -> bool:
+        """
+        Determine if an error should trigger automatic retry.
+        
+        Retryable errors:
+        - Network timeouts and connection errors
+        - Temporary server errors (5xx)
+        - Rate limit exceeded (429) with backoff
+        
+        Non-retryable errors:
+        - Authentication failures (401, 403)
+        - Invalid parameters (400, 422)
+        - Insufficient balance/funds
+        - Symbol/order not found (404)
+        
+        Args:
+            error: The exception to evaluate
+            
+        Returns:
+            True if error is transient and should be retried
+        """
+        pass
+    
+    @abstractmethod
+    def classify_error(self, error: Exception) -> str:
+        """
+        Classify error type for appropriate handling strategy.
+        
+        Returns one of:
+        - 'NETWORK_TIMEOUT': Connection or timeout issues
+        - 'AUTH_FAILURE': Invalid credentials or permissions
+        - 'RATE_LIMIT': API rate limit exceeded
+        - 'VALIDATION_ERROR': Invalid request parameters
+        - 'SERVER_ERROR': Exchange internal error (5xx)
+        - 'NOT_FOUND': Resource doesn't exist
+        - 'UNKNOWN': Unclassified error
+        
+        Args:
+            error: The exception to classify
+            
+        Returns:
+            Error classification string
+        """
         pass
