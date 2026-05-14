@@ -1,4 +1,5 @@
 """Verification Agent - Validates post-execution state immediately after order placement."""
+import asyncio
 from typing import Dict, Any
 from app.execution.agents.base_agent import BaseAgent
 from app.infra.exchange_manager import UnifiedExchangeManager
@@ -26,7 +27,12 @@ class VerificationAgent(BaseAgent):
         # Check 1: Verify order exists on exchange
         try:
             order_id = order_result.get('order_id')
-            exchange_order = await self.exchange_manager.fetch_order(order_id)
+            
+            # CRITICAL: Add timeout to prevent hanging on unresponsive exchange
+            exchange_order = await asyncio.wait_for(
+                self.exchange_manager.fetch_order(order_id),
+                timeout=10.0  # 10 second timeout
+            )
             
             if exchange_order:
                 verification_checks.append({
@@ -41,13 +47,43 @@ class VerificationAgent(BaseAgent):
                     'details': f"Order {order_id} NOT found on exchange"
                 })
                 all_passed = False
-        except Exception as e:
+        except asyncio.TimeoutError:
             verification_checks.append({
                 'check': 'order_exists_on_exchange',
                 'passed': False,
-                'details': f"Failed to fetch order: {str(e)}"
+                'details': f"Order fetch timed out after 10s for order {order_id}"
             })
             all_passed = False
+        except Exception as e:
+            # Retry once for transient errors
+            try:
+                await asyncio.sleep(1)
+                order_id = order_result.get('order_id')
+                exchange_order = await asyncio.wait_for(
+                    self.exchange_manager.fetch_order(order_id),
+                    timeout=10.0
+                )
+                
+                if exchange_order:
+                    verification_checks.append({
+                        'check': 'order_exists_on_exchange',
+                        'passed': True,
+                        'details': f"Order {order_id} confirmed (after retry)"
+                    })
+                else:
+                    verification_checks.append({
+                        'check': 'order_exists_on_exchange',
+                        'passed': False,
+                        'details': f"Order {order_id} NOT found on exchange (after retry)"
+                    })
+                    all_passed = False
+            except Exception as retry_error:
+                verification_checks.append({
+                    'check': 'order_exists_on_exchange',
+                    'passed': False,
+                    'details': f"Failed after retry: {str(retry_error)}"
+                })
+                all_passed = False
         
         # Check 2: Verify TP/SL orders placed (if applicable)
         tp_sl_check = await self._verify_tp_sl_orders(proposal, order_result)

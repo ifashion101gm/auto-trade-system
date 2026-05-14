@@ -3,9 +3,12 @@ Telegram notification service for trade alerts and system updates.
 Sends structured trade reports to Telegram upon trade events.
 """
 import httpx
+import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _format_usd(value: Any, default: str = "N/A") -> str:
@@ -64,17 +67,21 @@ class TelegramNotifier:
         self._rejection_cooldown_seconds = 600  # 10 minutes default cooldown
         
         if not self.enabled:
-            print("⚠️  Telegram notifications disabled (missing BOT_TOKEN or CHAT_ID)")
+            logger.warning("⚠️  Telegram notifications disabled (missing BOT_TOKEN or CHAT_ID)")
         
         self._initialized = True
     
-    async def send_message(self, text: str, parse_mode: str = "HTML") -> bool:
+    async def send_message(self, text: str, parse_mode: str = "HTML", max_retries: int = 3) -> bool:
         """
-        Send a message to Telegram chat.
+        Send a message to Telegram chat with retry logic.
+        
+        CRITICAL: Implements exponential backoff retry for transient failures.
+        Handles rate limiting (429) properly.
         
         Args:
             text: Message text (supports HTML formatting)
             parse_mode: Message format ("HTML" or "Markdown")
+            max_retries: Maximum number of retry attempts
             
         Returns:
             True if sent successfully, False otherwise
@@ -82,28 +89,43 @@ class TelegramNotifier:
         if not self.enabled:
             return False
         
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/sendMessage",
-                    json={
-                        "chat_id": self.chat_id,
-                        "text": text,
-                        "parse_mode": parse_mode,
-                        "disable_web_page_preview": True
-                    },
-                    timeout=5.0
-                )
-                
-                if response.status_code == 200:
-                    return True
-                else:
-                    print(f"⚠️  Telegram API error: {response.status_code} - {response.text}")
-                    return False
+        import asyncio
+        
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{self.base_url}/sendMessage",
+                        json={
+                            "chat_id": self.chat_id,
+                            "text": text,
+                            "parse_mode": parse_mode,
+                            "disable_web_page_preview": True
+                        },
+                        timeout=5.0
+                    )
                     
-        except Exception as e:
-            print(f"⚠️  Telegram notification failed: {e}")
-            return False
+                    if response.status_code == 200:
+                        return True
+                    elif response.status_code == 429:
+                        # Handle rate limiting - respect Retry-After header
+                        retry_after = int(response.headers.get('Retry-After', 2 ** attempt))
+                        logger.warning(f"Telegram rate limited, waiting {retry_after}s (attempt {attempt + 1})")
+                        await asyncio.sleep(retry_after)
+                        # Continue to retry
+                    else:
+                        logger.error(f"Telegram API error (attempt {attempt + 1}): {response.status_code} - {response.text}")
+                        
+            except Exception as e:
+                logger.warning(f"Telegram notification failed (attempt {attempt + 1}): {e}")
+            
+            # Exponential backoff before retry (if not rate limited)
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s
+                await asyncio.sleep(wait_time)
+        
+        logger.error(f"Telegram notification failed after {max_retries} attempts")
+        return False
     
     async def send_trade_entry(self, trade_data: Dict[str, Any]) -> bool:
         """
@@ -901,7 +923,7 @@ class TelegramNotifier:
             
             if elapsed < self._rejection_cooldown_seconds:
                 remaining = self._rejection_cooldown_seconds - elapsed
-                print(f"⚠️  Rejection report suppressed (cooldown): {symbol} - {reason_category} "
+                logger.debug(f"⚠️  Rejection report suppressed (cooldown): {symbol} - {reason_category} "
                       f"(score: {score_range}, {remaining:.0f}s remaining)")
                 return False
         

@@ -7,13 +7,14 @@ Use this checklist to get the Auto Trade System up and running in under 15 minut
 ## ⚡ Prerequisites (5 minutes)
 
 ### 1. System Requirements
-- [ ] Python 3.10+ installed
+- [ ] Python 3.11+ installed (required)
 - [ ] Git installed
 - [ ] Text editor (VS Code, nano, vim, etc.)
 
 ### 2. Exchange Accounts
-- [ ] Binance account (testnet: https://testnet.binance.vision/)
-- [ ] API keys generated (or use provided test keys)
+- [ ] Bybit account for Demo Trading (https://www.bybit.com/en/trade/demo)
+- [ ] API keys generated FROM demo mode interface (required for demo trading)
+- [ ] Alternative: Binance testnet (https://testnet.binance.vision/)
 
 ### 3. Optional but Recommended
 - [ ] Telegram account (for notifications)
@@ -56,9 +57,15 @@ nano .env  # or use your preferred editor
 ```bash
 TRADING_API_SECRET=<generate_with: openssl rand -hex 32>
 
-# Use provided test keys or add your own
+# Bybit Demo Trading (Primary)
+BYBIT_DEMO_API_KEY=your_demo_api_key_here
+BYBIT_DEMO_API_SECRET=your_demo_api_secret_here
+BYBIT_USE_DEMO_DOMAIN=true  # Use api-demo.bybit.com
+
+# Alternative: Binance Testnet
 BINANCE_API_KEY=your_key_here
 BINANCE_API_SECRET=your_secret_here
+BINANCE_TESTNET=true
 ```
 
 ---

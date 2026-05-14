@@ -65,8 +65,10 @@ class RecoveryAgent(BaseAgent):
         """Handle open circuit breaker."""
         self.logger.info("Attempting circuit breaker recovery...")
         
-        # Wait for cooldown period
-        await asyncio.sleep(30)
+        # Get actual cooldown from circuit breaker config (not hard-coded)
+        cooldown = getattr(self.startup_recovery.circuit_breaker, 'cooldown_seconds', 30)
+        self.logger.info(f"Waiting {cooldown}s for circuit breaker cooldown...")
+        await asyncio.sleep(cooldown)
         
         # Re-check health
         health = await self.startup_recovery.circuit_breaker.check_system_health()
@@ -133,7 +135,36 @@ class RecoveryAgent(BaseAgent):
         }
     
     async def _reset_state_machine(self):
-        """Reset state validator to clean IDLE state."""
-        self.logger.warning("Resetting state machine to IDLE")
+        """Reset state validator to clean IDLE state with proper notifications."""
+        self.logger.warning("⚠️ Resetting state machine to IDLE due to recovery")
+        
+        # Publish state reset event
+        if self.event_bus:
+            try:
+                from datetime import datetime
+                await self.event_bus.publish('STATE_RESET', {
+                    'reason': 'recovery_action',
+                    'previous_state': state_validator.current_state.value if state_validator.current_state else None,
+                    'timestamp': datetime.utcnow().isoformat()
+                })
+            except Exception as e:
+                self.logger.error(f"Failed to publish STATE_RESET event: {e}")
+        
+        # Reset state
         state_validator.current_state = None
         state_validator.transition_log.clear()
+        
+        # Send alert to Telegram
+        try:
+            from app.notifications.notifier import TelegramNotifier
+            notifier = TelegramNotifier()
+            await notifier.send_critical_alert(
+                'state_machine_reset',
+                {
+                    'reason': 'Recovery agent triggered manual reset',
+                    'severity': 'HIGH',
+                    'action': 'State machine reset to IDLE'
+                }
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to send state reset notification: {e}")

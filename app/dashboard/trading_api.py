@@ -95,19 +95,93 @@ async def get_trading_status(request: Request, auth: str = None):
 
 
 @router.post("/trading/execute")
-async def execute_trade(request: Request, auth: str = None):
-    """Execute a trade (placeholder)."""
+async def execute_trade(
+    request: Request,
+    trade_request: dict,
+    auth: str = None,
+    db_session: AsyncSession = Depends(get_session)
+):
+    """
+    Execute trade through proper execution service.
+    
+    This endpoint implements the professional execution architecture:
+    API → Execution Service → Risk Engine → Exchange → Database → Notifications
+    
+    Args:
+        trade_request: Trade execution parameters including:
+            - symbol: Trading pair (e.g., 'BTC/USDT')
+            - side: 'buy' or 'sell'
+            - entry_price: Target entry price
+            - quantity: Position size
+            - leverage: Leverage multiplier (default: 1)
+            - stop_loss: Optional stop loss price
+            - take_profit: Optional take profit price
+            - strategy_name: Strategy identifier
+            - confidence: Signal confidence (0-1)
+            - user_id: User identifier
+            - execution_mode: 'proposal', 'semi-auto', or 'fully-auto'
+            
+    Returns:
+        Execution result with order details and status
+        
+    Raises:
+        401: Invalid authentication
+        429: Rate limit exceeded
+        500: Execution failed
+    """
     # Verify authentication
     verify_trading_secret(auth)
     
     # Enforce rate limit
     await enforce_trading_rate_limit(request)
     
-    # TODO: Implement actual trade execution logic
-    return {
-        "status": "success",
-        "message": "Trade executed successfully"
-    }
+    try:
+        # Import execution service
+        from app.execution.execution_service import ExecutionService, ExecutionRequest
+        
+        # Create execution request
+        exec_request = ExecutionRequest(
+            symbol=trade_request.get('symbol'),
+            side=trade_request.get('side'),
+            entry_price=float(trade_request.get('entry_price')),
+            quantity=float(trade_request.get('quantity')),
+            leverage=int(trade_request.get('leverage', 1)),
+            stop_loss=trade_request.get('stop_loss'),
+            take_profit=trade_request.get('take_profit'),
+            strategy_name=trade_request.get('strategy_name'),
+            confidence=trade_request.get('confidence'),
+            user_id=trade_request.get('user_id', 'default_user'),
+            execution_mode=trade_request.get('execution_mode', 'fully-auto')
+        )
+        
+        # Execute trade through service
+        execution_service = ExecutionService(
+            exchange_name=settings.ACTIVE_EXCHANGE,
+            use_testnet=settings.BINANCE_TESTNET,
+            db_session_factory=lambda: db_session
+        )
+        
+        result = await execution_service.execute_trade(exec_request, db_session)
+        
+        # Commit if successful
+        if result.success:
+            await db_session.commit()
+        else:
+            await db_session.rollback()
+        
+        # Return result
+        return {
+            'status': 'success' if result.success else 'failed',
+            'result': result.to_dict()
+        }
+        
+    except Exception as e:
+        logger.error(f"Trade execution failed: {e}", exc_info=True)
+        await db_session.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Trade execution failed: {str(e)}"
+        )
 
 
 @router.post("/paper-trading/run-cycle")

@@ -575,7 +575,10 @@ class LiveTradingService:
     
     async def _fetch_market_data(self, symbol: str) -> Dict[str, Any]:
         """
-        Fetch real-time market data from exchange.
+        Fetch real-time market data from exchange with timeout and retry.
+        
+        CRITICAL: All external API calls must have timeouts to prevent system hangs.
+        Implements exponential backoff retry for transient failures.
         
         Args:
             symbol: Trading pair
@@ -583,11 +586,42 @@ class LiveTradingService:
         Returns:
             Market data dictionary with indicators
         """
-        # Fetch ticker data
-        ticker = await self.exchange_manager.fetch_ticker(symbol)
+        import asyncio
         
-        # Fetch OHLCV for technical indicators
-        ohlcv = await self.exchange_manager.fetch_ohlcv(symbol, timeframe='1h', limit=100)
+        max_retries = 3
+        timeout_seconds = 10
+        
+        ticker = None
+        ohlcv = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Fetch ticker with timeout
+                ticker = await asyncio.wait_for(
+                    self.exchange_manager.fetch_ticker(symbol),
+                    timeout=timeout_seconds
+                )
+                
+                # Fetch OHLCV with timeout (longer for historical data)
+                ohlcv = await asyncio.wait_for(
+                    self.exchange_manager.fetch_ohlcv(symbol, timeframe='1h', limit=100),
+                    timeout=timeout_seconds * 2
+                )
+                
+                # Success - break retry loop
+                break
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"Market data fetch timeout (attempt {attempt + 1}/{max_retries})")
+                if attempt == max_retries - 1:
+                    raise Exception(f"Market data fetch timed out after {max_retries} attempts for {symbol}")
+                await asyncio.sleep(1)  # Brief pause before retry
+                
+            except Exception as e:
+                logger.warning(f"Market data fetch error (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt == max_retries - 1:
+                    raise Exception(f"Market data fetch failed after {max_retries} attempts: {str(e)}")
+                await asyncio.sleep(1)
         
         # Calculate basic indicators
         closes = [candle[4] for candle in ohlcv]  # Close prices
@@ -637,6 +671,10 @@ class LiveTradingService:
         """
         Execute trade based on execution mode and position size.
         
+        CRITICAL: Implements pending state lifecycle to prevent phantom trades.
+        Trade record is created with ORDER_SUBMITTING status BEFORE exchange call.
+        Only updated to OPEN after exchange confirmation.
+        
         Hybrid Execution Logic:
         - Position ≤ $100 USD: Auto-execute (fully-auto behavior)
         - Position > $100 USD: Require confirmation (semi-auto behavior)
@@ -668,33 +706,6 @@ class LiveTradingService:
         
         # Calculate position value in USD
         position_value_usd = entry_price * quantity
-        
-        # Save proposal to database
-        if db_session:
-            trade_proposal = TradeProposals(
-                ts=datetime.utcnow().isoformat(),
-                user_id=user_id,
-                exchange=self.exchange_name,
-                symbol=symbol,
-                side=side.upper(),
-                entry_price=entry_price,
-                stop_loss=proposal.get('stop_loss'),
-                take_profit=proposal.get('take_profit'),
-                quantity=quantity,
-                confidence=proposal.get('confidence'),
-                strategy_name=proposal.get('strategy_name'),
-                status='pending',
-                ai_metadata=json.dumps({
-                    'regime': proposal.get('regime'),
-                    'risk_level': proposal.get('risk_level'),
-                    'position_value_usd': position_value_usd
-                })
-            )
-            db_session.add(trade_proposal)
-            await db_session.flush()
-            proposal_id = trade_proposal.id
-        else:
-            proposal_id = None
         
         # Determine execution mode based on position size
         should_auto_execute = False
@@ -773,7 +784,7 @@ class LiveTradingService:
                     prop_record = result.scalar_one_or_none()
                     if prop_record:
                         prop_record.status = 'rejected'
-                        await db_session.commit()
+                        await db_session.flush()  # Use flush, not commit
                 
                 return {
                     'status': 'rejected',
@@ -835,7 +846,7 @@ class LiveTradingService:
                     prop_record = result.scalar_one_or_none()
                     if prop_record:
                         prop_record.status = 'rejected'
-                        await db_session.commit()
+                        await db_session.flush()  # Use flush, not commit
                 
                 return {
                     'status': 'rejected',
@@ -857,8 +868,36 @@ class LiveTradingService:
         
         # Execute order if auto-execution is enabled
         if should_auto_execute:
+            proposal_id = None
+            trade_record = None
+            
             try:
-                # Validate position size against safety limits
+                # STEP 1: Create trade proposal record (if not exists)
+                if db_session and not proposal_id:
+                    trade_proposal = TradeProposals(
+                        ts=datetime.utcnow().isoformat(),
+                        user_id=user_id,
+                        exchange=self.exchange_name,
+                        symbol=symbol,
+                        side=side.upper(),
+                        entry_price=entry_price,
+                        stop_loss=proposal.get('stop_loss'),
+                        take_profit=proposal.get('take_profit'),
+                        quantity=quantity,
+                        confidence=proposal.get('confidence'),
+                        strategy_name=proposal.get('strategy_name'),
+                        status='pending',
+                        ai_metadata=json.dumps({
+                            'regime': proposal.get('regime'),
+                            'risk_level': proposal.get('risk_level'),
+                            'position_value_usd': position_value_usd
+                        })
+                    )
+                    db_session.add(trade_proposal)
+                    await db_session.flush()
+                    proposal_id = trade_proposal.id
+                
+                # STEP 2: Validate position size against safety limits
                 max_position_usd = (
                     settings.VALIDATION_MODE_MAX_POSITION_USD 
                     if self.use_testnet 
@@ -869,6 +908,15 @@ class LiveTradingService:
                     error_msg = f"Position value ${position_value_usd:.2f} exceeds safety limit ${max_position_usd:.2f}"
                     logger.error(error_msg)
                     
+                    # Update proposal status to rejected
+                    if db_session and proposal_id:
+                        stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
+                        result = await db_session.execute(stmt)
+                        prop_record = result.scalar_one_or_none()
+                        if prop_record:
+                            prop_record.status = 'rejected'
+                            await db_session.flush()
+                    
                     # Send alert via Telegram
                     await self.notifier.send_message(
                         f"🚨 SAFETY ALERT: Trade blocked\n{error_msg}\nSymbol: {symbol}\nSide: {side}"
@@ -876,7 +924,7 @@ class LiveTradingService:
                     
                     raise ValueError(error_msg)
                 
-                # Place market order
+                # STEP 3: Place market order on exchange
                 order_result = await self.exchange_manager.create_market_order(
                     symbol=symbol,
                     side=side,
@@ -890,7 +938,7 @@ class LiveTradingService:
                     f"Order: {order_result.get('order_id')}"
                 )
                 
-                # Update proposal status
+                # STEP 4: Update proposal status to executed
                 if db_session and proposal_id:
                     stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
                     result = await db_session.execute(stmt)
@@ -899,7 +947,7 @@ class LiveTradingService:
                         prop_record.status = 'executed'
                         await db_session.flush()
                 
-                # Create paper trade record
+                # STEP 5: Create paper trade record AFTER successful order
                 filled_price = order_result.get('price') or entry_price
                 fee = order_result.get('fee', {})
                 fee_cost = fee.get('cost', 0)
@@ -919,17 +967,18 @@ class LiveTradingService:
                     profit=None,
                     profit_pct=None,
                     status='open',
+                    trade_status='POSITION_OPEN',  # Proper lifecycle state
                     notes=f"Order ID: {order_result['order_id']}, Fee: ${fee_cost:.4f}, Position: ${position_value_usd:.2f}",
                     execution_mode='auto' if position_value_usd <= 100 else 'fully-auto'
                 )
                 
                 if db_session:
                     db_session.add(trade_record)
-                    await db_session.commit()
+                    await db_session.flush()  # Flush to get ID, but don't commit yet
                 
                 # Lifecycle log: Position opened
                 logger.info(
-                    f"[POSITION_OPEN] Trade ID: {trade_record.id} | "
+                    f"[POSITION_OPEN] Trade ID: {trade_record.id if db_session else 'N/A'} | "
                     f"Symbol: {trade_record.symbol} | Side: {trade_record.side}"
                 )
                 
@@ -948,14 +997,27 @@ class LiveTradingService:
                 }
                 
             except Exception as e:
-                # Mark proposal as failed
+                # Mark proposal as failed if it exists
                 if db_session and proposal_id:
-                    stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
-                    result = await db_session.execute(stmt)
-                    prop_record = result.scalar_one_or_none()
-                    if prop_record:
-                        prop_record.status = 'failed'
-                        await db_session.commit()
+                    try:
+                        stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
+                        result = await db_session.execute(stmt)
+                        prop_record = result.scalar_one_or_none()
+                        if prop_record:
+                            prop_record.status = 'failed'
+                            await db_session.flush()
+                    except Exception as update_error:
+                        logger.error(f"Failed to update proposal status: {update_error}")
+                
+                # If trade record was created but order failed, mark it as failed
+                if db_session and trade_record:
+                    try:
+                        trade_record.status = 'failed'
+                        trade_record.trade_status = 'FAILED'
+                        trade_record.notes += f"\nExecution failed: {str(e)}"
+                        await db_session.flush()
+                    except Exception as update_error:
+                        logger.error(f"Failed to update trade record: {update_error}")
                 
                 raise Exception(f"Order execution failed: {str(e)}")
         

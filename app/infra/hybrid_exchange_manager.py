@@ -127,7 +127,11 @@ class HybridExchangeManager:
         leverage: int = 1
     ) -> Dict[str, Any]:
         """
-        Execute trade on BOTH exchanges simultaneously.
+        Execute trade on BOTH exchanges simultaneously with task isolation.
+        
+        CRITICAL: Uses asyncio.gather with return_exceptions=True to ensure
+        one failing exchange does NOT crash the other. This is production-grade
+        error isolation for dual-exchange trading.
         
         Primary execution is on MEXC Demo Futures (XAUT/USDT).
         Secondary execution is on Binance Testnet (PAXG/USDT) for comparison.
@@ -141,61 +145,123 @@ class HybridExchangeManager:
         Returns:
             Dictionary with execution results from both exchanges
         """
-        results = {
-            'binance': None,
-            'mexc': None,
-            'status': 'partial'
-        }
+        import asyncio
         
-        # Execute on MEXC Demo Futures (primary)
-        if self.mexc_client:
+        # Define isolated tasks for each exchange
+        async def execute_on_mexc():
+            """Execute on MEXC with full isolation."""
             try:
+                if not self.mexc_client:
+                    return {
+                        'status': 'failed',
+                        'error': 'MEXC client not available',
+                        'type': 'demo_futures'
+                    }
+                
                 mexc_result = await self.mexc_client.create_market_order(
                     symbol=settings.GOLD_SYMBOL_MEXC,
                     side=side,
                     amount=amount_mexc,
                     leverage=leverage
                 )
-                results['mexc'] = {
+                return {
                     'status': 'success',
                     'order': mexc_result,
                     'type': 'demo_futures'
                 }
             except Exception as e:
-                results['mexc'] = {
+                logger.error(f"MEXC trade execution failed: {e}")
+                return {
                     'status': 'failed',
                     'error': str(e),
                     'type': 'demo_futures'
                 }
         
-        # Execute on Binance Testnet (comparison/paper)
-        if self.binance_client:
+        async def execute_on_binance():
+            """Execute on Binance with full isolation."""
             try:
+                if not self.binance_client:
+                    return {
+                        'status': 'failed',
+                        'error': 'Binance client not available',
+                        'type': 'paper_testnet'
+                    }
+                
                 binance_result = await self.binance_client.create_market_order(
                     symbol=settings.GOLD_SYMBOL_BINANCE,
                     side=side,
                     amount=amount_binance,
                     leverage=leverage
                 )
-                results['binance'] = {
+                return {
                     'status': 'success',
                     'order': binance_result,
                     'type': 'paper_testnet'
                 }
             except Exception as e:
-                results['binance'] = {
+                logger.error(f"Binance trade execution failed: {e}")
+                return {
                     'status': 'failed',
                     'error': str(e),
                     'type': 'paper_testnet'
                 }
         
+        # Execute both trades in parallel with exception isolation
+        # CRITICAL: return_exceptions=True prevents one failure from crashing the other
+        logger.info(f"🔄 Executing dual trade on MEXC and Binance (isolated tasks)...")
+        
+        mexc_task = asyncio.create_task(execute_on_mexc())
+        binance_task = asyncio.create_task(execute_on_binance())
+        
+        results_list = await asyncio.gather(
+            mexc_task,
+            binance_task,
+            return_exceptions=True
+        )
+        
+        # Unpack results
+        mexc_result = results_list[0]
+        binance_result = results_list[1]
+        
+        # Handle unexpected exceptions from gather (shouldn't happen due to inner try/except)
+        if isinstance(mexc_result, Exception):
+            logger.error(f"Unexpected MEXC task exception: {mexc_result}")
+            mexc_result = {
+                'status': 'failed',
+                'error': f'Unexpected exception: {str(mexc_result)}',
+                'type': 'demo_futures'
+            }
+        
+        if isinstance(binance_result, Exception):
+            logger.error(f"Unexpected Binance task exception: {binance_result}")
+            binance_result = {
+                'status': 'failed',
+                'error': f'Unexpected exception: {str(binance_result)}',
+                'type': 'paper_testnet'
+            }
+        
+        # Build final result
+        results = {
+            'binance': binance_result,
+            'mexc': mexc_result,
+            'status': 'partial'
+        }
+        
         # Determine overall status
-        if results['binance'] and results['binance']['status'] == 'success' and \
-           results['mexc'] and results['mexc']['status'] == 'success':
+        if (results['binance'] and results['binance']['status'] == 'success' and 
+            results['mexc'] and results['mexc']['status'] == 'success'):
             results['status'] = 'success'
-        elif results['binance'] and results['binance']['status'] == 'failed' and \
-             results['mexc'] and results['mexc']['status'] == 'failed':
+            logger.info("✅ Dual trade executed successfully on both exchanges")
+        elif (results['binance'] and results['binance']['status'] == 'failed' and 
+              results['mexc'] and results['mexc']['status'] == 'failed'):
             results['status'] = 'failed'
+            logger.error("❌ Dual trade failed on both exchanges")
+        else:
+            # Partial success - log which one succeeded
+            if results['mexc'] and results['mexc']['status'] == 'success':
+                logger.warning("⚠️  MEXC succeeded but Binance failed (partial execution)")
+            elif results['binance'] and results['binance']['status'] == 'success':
+                logger.warning("⚠️  Binance succeeded but MEXC failed (partial execution)")
         
         return results
     

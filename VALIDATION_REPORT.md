@@ -5,8 +5,14 @@
 The Auto Trade System has been successfully validated with full multi-exchange support, AI-powered decision making, and real-time notifications. All core components are operational and ready for production deployment.
 
 **Validation Date:** May 10, 2026  
+**Last Updated:** May 14, 2026 (Documentation Audit)  
 **System Status:** ✅ READY FOR TRADING  
 **Test Result:** 7/7 Tests Passed
+
+**⚠️ NOTE:** This report reflects the system state as of May 10, 2026. Since then:
+- Active exchange changed from Binance to **Bybit** (Demo Trading)
+- Bybit client library set to **pybit** (required for demo mode)
+- MEXC documentation archived to `docs_archive/deprecated/`
 
 ---
 
@@ -24,8 +30,9 @@ All API credentials successfully loaded from `.env`:
 
 **Configuration Details:**
 ```
-Active Exchange: BINANCE
-Testnet Mode: True (Safe for testing)
+Active Exchange: BYBIT (as of May 14, 2026)
+Client Library: pybit (official SDK for Demo Trading)
+Testnet Mode: False (using api-demo.bybit.com)
 Execution Mode: semi-auto (Requires manual confirmation)
 ```
 

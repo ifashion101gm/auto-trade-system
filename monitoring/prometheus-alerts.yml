@@ -1,6 +1,10 @@
 groups:
   - name: trading_alerts
     rules:
+      # ======================================================================
+      # HTTP & Infrastructure Alerts
+      # ======================================================================
+      
       - alert: HighErrorRate
         expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
         for: 2m
@@ -9,6 +13,7 @@ groups:
         annotations:
           summary: "High error rate detected"
           description: "Error rate is {{ $value }} errors per second"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#high-error-rate"
           
       - alert: WebSocketDisconnected
         expr: websocket_connected == 0
@@ -18,6 +23,7 @@ groups:
         annotations:
           summary: "WebSocket connection lost"
           description: "WebSocket has been disconnected for more than 1 minute"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#websocket-disconnected"
           
       - alert: DatabaseConnectionPoolExhausted
         expr: db_pool_available <= 0
@@ -27,6 +33,7 @@ groups:
         annotations:
           summary: "Database connection pool exhausted"
           description: "No available database connections in the pool"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#db-pool-exhausted"
           
       - alert: HighLatency
         expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m])) > 1
@@ -46,57 +53,61 @@ groups:
           summary: "Redis is down"
           description: "Redis instance is not responding"
       
-      # High execution latency
+      # ======================================================================
+      # Trading Execution Alerts (Phase 3 Metrics)
+      # ======================================================================
+      
       - alert: HighExecutionLatency
-        expr: histogram_quantile(0.95, rate(trade_execution_latency_ms_bucket[5m])) > 1000
+        expr: histogram_quantile(0.95, rate(trading_order_latency_seconds_bucket[5m])) > 1
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "High trade execution latency detected"
-          description: "95th percentile latency is {{ $value }}ms (>1000ms threshold)"
+          description: "95th percentile execution latency is {{ $value }}s on {{ $labels.exchange }}/{{ $labels.symbol }} (>1s threshold)"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#high-execution-latency"
 
-      # Frequent WebSocket reconnections
-      - alert: FrequentWebSocketReconnects
-        expr: rate(websocket_reconnect_total[1h]) > 5
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Frequent WebSocket reconnections"
-          description: "{{ $value }} reconnects/hour on {{ $labels.exchange }}"
-
-      # High API failure rate
-      - alert: HighAPIFailureRate
-        expr: rate(api_failure_total[5m]) > 0.1
+      - alert: OrderExecutionFailureSpike
+        expr: rate(trading_orders_total{status="failed"}[5m]) > 0.05
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "High API failure rate"
-          description: "{{ $value }} failures/sec on {{ $labels.endpoint }}"
+          summary: "Order execution failure spike"
+          description: "{{ $value }} failed orders/sec on {{ $labels.exchange }}/{{ $labels.symbol }}"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#order-failure-spike"
 
-      # Desync events detected
-      - alert: DesyncEventsDetected
-        expr: rate(desync_events_total[1h]) > 0
-        for: 15m
+      - alert: AbnormalPositionSize
+        expr: trading_position_size_usd > 10000
+        for: 1m
         labels:
           severity: warning
         annotations:
-          summary: "Position desynchronization detected"
-          description: "{{ $value }} desyncs/hour on {{ $labels.exchange }}"
+          summary: "Abnormally large position detected"
+          description: "Position size is ${{ $value }} on {{ $labels.exchange }}/{{ $labels.symbol }}/{{ $labels.side }}"
 
-      # Circuit breaker open
-      - alert: CircuitBreakerOpen
-        expr: circuit_breaker_state == 2
-        for: 1m
+      # ======================================================================
+      # P&L & Risk Alerts
+      # ======================================================================
+
+      - alert: NegativeRealizedPnL
+        expr: trading_pnl_realized_usd < -500
+        for: 5m
         labels:
-          severity: critical
+          severity: warning
         annotations:
-          summary: "Circuit breaker is OPEN"
-          description: "Component {{ $labels.component }} has tripped circuit breaker"
+          summary: "Significant realized loss detected"
+          description: "Realized P&L is ${{ $value }} on {{ $labels.exchange }}/{{ $labels.strategy }}"
 
-      # High daily drawdown
+      - alert: LowWinRate
+        expr: trading_win_rate < 40
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low win rate detected"
+          description: "Win rate is {{ $value }}% on {{ $labels.exchange }}/{{ $labels.strategy }} (<40% threshold)"
+
       - alert: HighDailyDrawdown
         expr: daily_drawdown_percentage > 5
         for: 5m
@@ -105,8 +116,21 @@ groups:
         annotations:
           summary: "High daily drawdown detected"
           description: "Drawdown is {{ $value }}% (>5% threshold)"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#high-drawdown"
 
-      # Order rejection spike
+      # ======================================================================
+      # Signal & Rejection Alerts
+      # ======================================================================
+
+      - alert: HighSignalRejectionRate
+        expr: rate(trading_signal_rejections_total[15m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High signal rejection rate"
+          description: "{{ $value }} rejections/sec for reason={{ $labels.reason }}, strategy={{ $labels.strategy }}"
+
       - alert: OrderRejectionSpike
         expr: rate(order_rejection_total[30m]) > 0.05
         for: 10m
@@ -115,3 +139,92 @@ groups:
         annotations:
           summary: "Increased order rejection rate"
           description: "{{ $value }} rejections/min on {{ $labels.exchange }}"
+
+      # ======================================================================
+      # System Health & Circuit Breaker Alerts
+      # ======================================================================
+
+      - alert: HighAPIFailureRate
+        expr: rate(system_api_calls_total{status="failure"}[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High API failure rate"
+          description: "{{ $value }} failures/sec on {{ $labels.exchange }}/{{ $labels.endpoint }}"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#api-failure-rate"
+
+      - alert: CircuitBreakerOpen
+        expr: system_circuit_breaker_state == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Circuit breaker is OPEN"
+          description: "Circuit breaker tripped on {{ $labels.exchange }} - trading blocked"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#circuit-breaker-open"
+
+      - alert: HighSystemErrorRate
+        expr: rate(system_errors_total[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High system error rate"
+          description: "{{ $value }} errors/sec for type={{ $labels.error_type }}, component={{ $labels.component }}"
+
+      # ======================================================================
+      # Reconciliation Alerts
+      # ======================================================================
+
+      - alert: ReconciliationMismatchesDetected
+        expr: reconciliation_mismatches_total > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Position reconciliation mismatches detected"
+          description: "{{ $value }} mismatches of type={{ $labels.type }}"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#reconciliation-mismatches"
+
+      - alert: FrequentReconciliationRepairs
+        expr: rate(reconciliation_repairs_total[1h]) > 5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Frequent reconciliation repairs"
+          description: "{{ $value }} repairs/hour for type={{ $labels.type }} - investigate root cause"
+
+      # ======================================================================
+      # Watchdog Alerts
+      # ======================================================================
+
+      - alert: WatchdogCriticalAlert
+        expr: rate(watchdog_alerts_total{severity="CRITICAL"}[15m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical watchdog alert triggered"
+          description: "{{ $value }} critical alerts from {{ $labels.watchdog_type }} watchdog"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#watchdog-critical"
+
+      - alert: WatchdogSystemHealthDegraded
+        expr: watchdog_system_health < 0.7
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Watchdog system health degraded"
+          description: "Health score is {{ $value }} for {{ $labels.watchdog_type }} (<0.7 threshold)"
+
+      - alert: MemoryUsageCritical
+        expr: watchdog_system_health{watchdog_type="memory"} < 0.3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Memory usage critical"
+          description: "Memory watchdog health is {{ $value }} - risk of OOM"
+          runbook_url: "https://github.com/your-repo/auto-trade-system/wiki/AlertRunbooks#memory-critical"

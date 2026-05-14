@@ -23,6 +23,7 @@ from app.notifications.telegram_agent import TelegramAgent
 from app.events.event_bus import event_bus
 from app.events.event_store import event_store
 from app.risk.risk_engine import RiskEngine
+from app.monitoring.prometheus_metrics import get_metrics_collector
 
 # Prometheus metrics
 REQUEST_COUNT = Counter(
@@ -50,6 +51,7 @@ reconciliation_service = ReconciliationService()
 position_sync_service = None  # Will be initialized on startup
 heartbeat_monitor = None  # Will be initialized on startup
 telegram_agent = None  # Will be initialized on startup
+reconciliation_engine = None  # Order reconciliation engine (Phase 2)
 
 
 @asynccontextmanager
@@ -122,6 +124,19 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(reconciliation_loop())
     logger.info("✅ Reconciliation loop started")
     
+    # PHASE 2: Start Order Reconciliation Engine (every 60 seconds)
+    global reconciliation_engine
+    from app.execution.reconciliation_engine import OrderReconciliationEngine
+    reconciliation_engine = OrderReconciliationEngine(
+        exchange_name=settings.ACTIVE_EXCHANGE,
+        use_testnet=settings.BINANCE_TESTNET,
+        reconciliation_interval=60,  # Run every 60 seconds
+        auto_repair_safe=True  # Auto-repair safe mismatches
+    )
+    logger.info("🔄 Starting Order Reconciliation Engine (60s interval)...")
+    asyncio.create_task(reconciliation_engine.start(get_session))
+    logger.info("✅ Order Reconciliation Engine started")
+    
     # Start heartbeat monitor
     global heartbeat_monitor
     from app.heartbeat_monitor import HeartbeatMonitor
@@ -145,6 +160,11 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("🛑 Shutting down Auto Trade System...")
+    
+    # Stop Order Reconciliation Engine (Phase 2)
+    if reconciliation_engine:
+        reconciliation_engine.stop()
+        logger.info("✅ Order Reconciliation Engine stopped")
     
     await event_bus.stop_processing()
     logger.info("✅ EventBus stopped")
@@ -206,6 +226,23 @@ async def root():
         "docs": "/docs",
         "version": "2.0.0"
     }
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """
+    Prometheus metrics endpoint.
+    
+    Exposes all trading system metrics in Prometheus exposition format.
+    Scrape this endpoint with Prometheus server for monitoring and alerting.
+    
+    Returns:
+        Plain text metrics in Prometheus format
+    """
+    collector = get_metrics_collector()
+    return Response(
+        content=collector.get_metrics(),
+        media_type=collector.get_content_type()
+    )
 
 # ============================================================================
 # Helper Functions for Comprehensive Metrics

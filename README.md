@@ -1,9 +1,11 @@
 # Auto Trade System - Self-Healing Trading Infrastructure
 
-Production-ready, self-healing automated trading system with AI-powered decision making, multi-exchange support, and resilient closed-loop architecture.
+Production-ready, self-healing automated trading system with AI-powered decision making, Bybit integration (pybit SDK), and resilient closed-loop architecture.
 
 **Python Version**: 3.11+ required  
-**Status**: ✅ Production Ready (v2.0.0 - Self-Healing Edition)
+**Status**: ✅ Production Ready (v2.0.0 - Self-Healing Edition)  
+**Active Exchange**: Bybit (Demo Trading via pybit SDK)  
+**Execution Mode**: semi-auto (hybrid threshold: $100)
 
 ## 🎯 Overview
 
@@ -15,7 +17,7 @@ This repository contains a **self-healing automated trading infrastructure** cap
 - 🔍 **AI Anomaly Detection** identifying unusual patterns
 - ♻️ **Automatic Recovery** from runtime failures
 - 📊 **Continuous Reconciliation** ensuring data integrity
-- 🌐 **Multi-Exchange Support** (MEXC, Binance, Bybit)
+- 🌐 **Multi-Exchange Support** (Bybit primary, Binance/MEXC available)
 
 ## ✨ Features
 
@@ -48,10 +50,13 @@ This repository contains a **self-healing automated trading infrastructure** cap
 - Support for `.env` files and production secrets
 
 ### 6. Multi-Exchange Trading Integration
-- MEXC Futures (Primary) with testnet and live modes
-- Binance Testnet for paper trading validation
-- Bybit integration support
-- CCXT-based exchange abstraction layer
+- **Bybit Demo Trading** (Primary) using official pybit SDK
+  - Connects to api-demo.bybit.com for virtual fund trading
+  - Full V5 API compliance with proper error handling
+  - Supports linear perpetual swaps (BTCUSDT, ETHUSDT, XAUUSDT)
+- **Binance Testnet** for paper trading validation
+- **MEXC** integration available (archived documentation)
+- CCXT-based exchange abstraction layer for unified interface
 
 ### 7. Real-Time Monitoring Stack
 - Prometheus metrics collection
@@ -184,9 +189,14 @@ Docker Compose orchestrates the entire infrastructure stack including databases,
 ### Additional Technology Stack
 
 #### Exchange Integration
+- **Bybit pybit SDK**: [pybit Documentation](https://bybit-exchange.github.io/pybit/) (official Bybit SDK)
+  - Required for Demo Trading support (CCXT does NOT support demo mode)
+  - Full V5 API compliance with proper error handling
+  - Used in: `app/infra/bybit_client.py`, `app/infra/pybit_demo_client.py`
 - **CCXT Library**: [CCXT Documentation](https://docs.ccxt.com/) (version 4.5.18)
-  - Unified crypto exchange API abstraction
-  - Supports MEXC, Binance, Bybit, and 100+ exchanges
+  - Unified crypto exchange API abstraction for testnet/mainnet
+  - Supports Binance, MEXC, and other exchanges
+  - Not used for Bybit Demo Trading (pybit required)
 - **MEXC Futures API**: [MEXC API Docs](https://mexcdevelop.github.io/apidocs/contract_v1_en/)
 - **Binance API**: [Binance API Docs](https://binance-docs.github.io/apidocs/)
 
@@ -246,10 +256,18 @@ Docker Compose orchestrates the entire infrastructure stack including databases,
 ### Core Documentation
 - **Self-Healing Architecture**: [docs/SELF_HEALING_ARCHITECTURE.md](docs/SELF_HEALING_ARCHITECTURE.md) - Complete guide to agent-based architecture
 - **Implementation Summary**: [SELF_HEALING_IMPLEMENTATION_SUMMARY.md](SELF_HEALING_IMPLEMENTATION_SUMMARY.md) - What was built and how
+- **Bybit Configuration**: [BYBIT_DEMO_TRADING_CONFIGURATION.md](BYBIT_DEMO_TRADING_CONFIGURATION.md) - Bybit demo trading setup guide
 - **Migrations**: [migrations/README.md](migrations/README.md)
 - **Backups:** `scripts/BACKUP_RESTORE_README.md`
 - **Optimization Plan:** `OPTIMIZATION_COMPLETE.md`
 - **API Docs:** Available at `/docs` when running FastAPI server
+
+### Archived Documentation
+Historical reports and deprecated exchange documentation have been moved to:
+- **Deprecated MEXC docs**: `docs_archive/deprecated/` (15 files)
+- **Historical reports**: `docs_archive/historical_reports/` (dated status reports)
+
+These documents are preserved for reference but may contain outdated configuration information.
 
 ## 🧪 Testing
 
@@ -262,4 +280,5 @@ python scripts/validate_new_features.py
 MIT License
 
 ---
-**Version:** 1.0.0 | **Status:** Production Ready ✅
+**Version:** 2.0.0 (Self-Healing Edition) | **Status:** Production Ready ✅  
+**Last Updated:** May 14, 2026 | **Active Exchange:** Bybit (pybit SDK)

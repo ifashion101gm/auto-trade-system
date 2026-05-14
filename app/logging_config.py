@@ -528,6 +528,167 @@ def log_sync_result(
 
 
 # ============================================================================
+# Structured Event Logging for Trading Operations (JSON Format)
+# ============================================================================
+
+def log_structured_event(event_type: str, **kwargs):
+    """
+    Log a structured event in JSON format for analytics and monitoring.
+    
+    CRITICAL: This function creates machine-parseable logs suitable for:
+    - Prometheus metrics extraction
+    - Grafana dashboards
+    - AI-powered anomaly detection
+    - Trade replay and debugging
+    
+    Args:
+        event_type: Event type identifier (e.g., 'ORDER_EXECUTED', 'SIGNAL_REJECTED')
+        **kwargs: Additional event-specific fields
+        
+    Usage:
+        log_structured_event(
+            'ORDER_EXECUTED',
+            symbol='XAUUSDT',
+            side='BUY',
+            qty=0.1,
+            price=2345.67,
+            latency_ms=523,
+            exchange='bybit'
+        )
+    """
+    import json
+    from datetime import datetime
+    
+    # Build structured event
+    event = {
+        "event": event_type,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        **kwargs
+    }
+    
+    # Log as JSON string
+    logger.info(json.dumps(event, default=str))
+
+
+def log_order_executed(
+    order_id: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+    price: float,
+    exchange: str,
+    latency_ms: float,
+    strategy: str = None,
+    trade_id: str = None,
+):
+    """Log order execution event with full context."""
+    log_structured_event(
+        "ORDER_EXECUTED",
+        order_id=order_id,
+        symbol=symbol,
+        side=side,
+        quantity=quantity,
+        price=price,
+        exchange=exchange,
+        latency_ms=round(latency_ms, 2),
+        strategy=strategy,
+        trade_id=trade_id,
+    )
+
+
+def log_signal_rejected(
+    signal_hash: str,
+    symbol: str,
+    reason: str,
+    violations: list = None,
+    strategy: str = None,
+):
+    """Log signal rejection event."""
+    log_structured_event(
+        "SIGNAL_REJECTED",
+        signal_hash=signal_hash,
+        symbol=symbol,
+        reason=reason,
+        violations=violations or [],
+        strategy=strategy,
+    )
+
+
+def log_risk_check(
+    check_type: str,
+    passed: bool,
+    value: float = None,
+    threshold: float = None,
+    symbol: str = None,
+    trade_id: str = None,
+):
+    """Log risk management check result."""
+    log_structured_event(
+        "RISK_CHECK",
+        check_type=check_type,
+        passed=passed,
+        value=value,
+        threshold=threshold,
+        symbol=symbol,
+        trade_id=trade_id,
+    )
+
+
+def log_circuit_breaker_state_change(
+    previous_state: str,
+    new_state: str,
+    reason: str,
+    failure_count: int = None,
+    cooldown_seconds: int = None,
+):
+    """Log circuit breaker state transition."""
+    log_structured_event(
+        "CIRCUIT_BREAKER_STATE_CHANGE",
+        previous_state=previous_state,
+        new_state=new_state,
+        reason=reason,
+        failure_count=failure_count,
+        cooldown_seconds=cooldown_seconds,
+    )
+
+
+def log_watchdog_alert(
+    watchdog_type: str,
+    severity: str,
+    message: str,
+    action_taken: str = None,
+    metrics: dict = None,
+):
+    """Log watchdog alert event."""
+    log_structured_event(
+        "WATCHDOG_ALERT",
+        watchdog_type=watchdog_type,
+        severity=severity,
+        message=message,
+        action_taken=action_taken,
+        metrics=metrics or {},
+    )
+
+
+def log_reconciliation_result(
+    db_positions: int,
+    exchange_positions: int,
+    mismatches: int,
+    repairs: int,
+    duration_ms: float,
+):
+    """Log reconciliation cycle result."""
+    log_structured_event(
+        "RECONCILIATION_COMPLETE",
+        db_positions=db_positions,
+        exchange_positions=exchange_positions,
+        mismatches=mismatches,
+        repairs=repairs,
+        duration_ms=round(duration_ms, 2),
+    )
+
+
+# ============================================================================
 # Initialize Logger on Module Import
 # ============================================================================
 
@@ -536,4 +697,7 @@ setup_logger()
 # Export configured logger
 __all__ = ['logger', 'trade_context', 'order_context', 
            'log_trade_entry', 'log_trade_exit', 'log_api_error',
-           'log_websocket_event', 'log_sync_result']
+           'log_websocket_event', 'log_sync_result',
+           'log_structured_event', 'log_order_executed', 'log_signal_rejected',
+           'log_risk_check', 'log_circuit_breaker_state_change',
+           'log_watchdog_alert', 'log_reconciliation_result']

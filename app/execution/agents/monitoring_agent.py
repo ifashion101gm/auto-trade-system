@@ -68,12 +68,19 @@ class MonitoringAgent(BaseAgent):
         }
         
         # Check 4: Drawdown check (via risk engine context)
+        # CRITICAL FIX: Only block on negative P&L (drawdown), not positive P&L (profit)
         daily_pnl_pct = context.get('daily_pnl_pct', 0)
-        if abs(daily_pnl_pct) > self.max_drawdown_pct:
+        current_drawdown_pct = context.get('current_drawdown_pct', 0)
+        
+        # Use explicit drawdown metric if available, otherwise calculate from P&L
+        # Drawdown should only be tracked when P&L is negative
+        drawdown_to_check = current_drawdown_pct if current_drawdown_pct != 0 else min(daily_pnl_pct, 0)
+        
+        if abs(drawdown_to_check) > self.max_drawdown_pct:
             health_report['issues'].append({
                 'type': 'excessive_drawdown',
                 'severity': 'CRITICAL',
-                'drawdown_pct': daily_pnl_pct,
+                'drawdown_pct': drawdown_to_check,
                 'threshold_pct': self.max_drawdown_pct
             })
             health_report['can_continue_trading'] = False

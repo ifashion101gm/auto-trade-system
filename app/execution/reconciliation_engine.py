@@ -1,354 +1,473 @@
 """
-Position Reconciliation Engine - Critical Component
-Compares states across Exchange, Database, Risk Engine, and Open Orders.
-Runs every few seconds to detect and repair discrepancies.
+Order Reconciliation Engine - Periodic state sync verification.
+
+This engine detects and repairs mismatches between database and exchange state:
+- Orphaned orders (in DB but not on exchange)
+- Ghost positions (on exchange but not in DB)
+- Status mismatches (different status in DB vs exchange)
+- Quantity/price discrepancies
+
+Runs periodically (every 60 seconds) as a background task to ensure
+database-exchange consistency for reliable trading operations.
 """
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
-from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
-from app.exchange.exchange_router import ExchangeRouter
-from app.database.repositories import TradeRepository, PositionRepository, OrderRepository
-from app.risk.risk_engine import RiskEngine
-from app.events.event_bus import event_bus
+from app.infra.exchange_manager import UnifiedExchangeManager
+from app.database.models import PaperTrades, TradeProposals
 from app.notifications.notifier import TelegramNotifier
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-class ReconciliationDiscrepancy:
-    """Represents a detected discrepancy."""
+class ReconciliationResult:
+    """Result of reconciliation run."""
+    
+    def __init__(self):
+        self.timestamp = datetime.utcnow()
+        self.mismatches_found = 0
+        self.mismatches_repaired = 0
+        self.mismatches_alerted = 0
+        self.orphaned_orders = []
+        self.ghost_positions = []
+        self.status_mismatches = []
+        self.errors = []
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            'timestamp': self.timestamp.isoformat(),
+            'mismatches_found': self.mismatches_found,
+            'mismatches_repaired': self.mismatches_repaired,
+            'mismatches_alerted': self.mismatches_alerted,
+            'orphaned_orders_count': len(self.orphaned_orders),
+            'ghost_positions_count': len(self.ghost_positions),
+            'status_mismatches_count': len(self.status_mismatches),
+            'errors': self.errors
+        }
+
+
+class OrderReconciliationEngine:
+    """
+    Periodic reconciliation of database vs exchange state.
+    
+    This engine runs continuously as a background task, comparing
+    open positions in the database with actual positions on the exchange.
+    
+    Detected issues are either auto-repaired (safe operations) or
+    flagged for manual review (risky operations).
+    """
     
     def __init__(
         self,
-        discrepancy_type: str,
-        symbol: str,
-        exchange_state: Dict,
-        db_state: Dict,
-        severity: str = "HIGH"
+        exchange_name: str = "binance",
+        use_testnet: bool = True,
+        reconciliation_interval: int = 60,
+        auto_repair_safe: bool = True
     ):
-        self.discrepancy_type = discrepancy_type
-        self.symbol = symbol
-        self.exchange_state = exchange_state
-        self.db_state = db_state
-        self.severity = severity
-        self.detected_at = datetime.utcnow()
-
-
-class PositionReconciliationEngine:
-    """
-    High-priority reconciliation engine that runs continuously.
-    
-    Compares:
-    - Exchange positions vs Database positions
-    - Open orders vs Trade records
-    - Risk engine state vs actual positions
-    
-    Recovery Rules:
-    1. DB shows LONG but Exchange shows NONE → Emergency sync + Alert + Freeze strategy
-    2. Exchange shows position but DB missing → Recreate DB record
-    3. Size mismatch → Update DB to match exchange
-    4. Orphaned orders → Cancel or reconcile
-    """
-    
-    def __init__(self, testnet: bool = False):
-        self.router = ExchangeRouter()
-        self.trade_repo = TradeRepository()
-        self.position_repo = PositionRepository()
-        self.order_repo = OrderRepository()
-        self.risk_engine = RiskEngine(db_session=None)
+        """
+        Initialize reconciliation engine.
+        
+        Args:
+            exchange_name: Exchange to reconcile against
+            use_testnet: Use testnet mode
+            reconciliation_interval: Seconds between reconciliation runs
+            auto_repair_safe: Auto-repair safe mismatches (orphaned orders)
+        """
+        self.exchange_name = exchange_name
+        self.use_testnet = use_testnet
+        self.reconciliation_interval = reconciliation_interval
+        self.auto_repair_safe = auto_repair_safe
+        
+        # Initialize components
+        self.exchange_manager = UnifiedExchangeManager(
+            exchange_name=exchange_name,
+            use_testnet=use_testnet
+        )
         self.notifier = TelegramNotifier()
-        self.testnet = testnet
-        self._running = False
-        self._check_interval = 5  # seconds
-        self.strategy_frozen = False
+        
+        # State tracking
+        self.is_running = False
+        self.last_run = None
+        self.total_runs = 0
+        self.total_mismatches = 0
+        
+        logger.info(f"✅ Reconciliation Engine initialized ({exchange_name.upper()})")
     
     async def start(self, db_session_factory):
-        """Start continuous reconciliation loop."""
-        self._running = True
-        logger.info(f"🔄 Reconciliation Engine started (interval={self._check_interval}s)")
+        """
+        Start reconciliation loop as background task.
         
-        while self._running:
+        Args:
+            db_session_factory: Factory function to create DB sessions
+        """
+        if self.is_running:
+            logger.warning("Reconciliation engine already running")
+            return
+        
+        self.is_running = True
+        logger.info("🔄 Starting reconciliation engine...")
+        
+        while self.is_running:
             try:
+                # Create new session for each run
                 async with db_session_factory() as db_session:
-                    await self.run_reconciliation_cycle(db_session)
-                
-                await asyncio.sleep(self._check_interval)
-                
+                    result = await self.run_reconciliation(db_session)
+                    
+                    # Log results
+                    if result.mismatches_found > 0:
+                        logger.warning(
+                            f"⚠️ Reconciliation found {result.mismatches_found} mismatches: "
+                            f"{result.mismatches_repaired} repaired, "
+                            f"{result.mismatches_alerted} alerted"
+                        )
+                    else:
+                        logger.debug("✅ Reconciliation: No mismatches found")
+                    
+                    self.last_run = datetime.utcnow()
+                    self.total_runs += 1
+                    self.total_mismatches += result.mismatches_found
+                    
             except Exception as e:
-                logger.error(f"❌ Reconciliation error: {e}")
-                await asyncio.sleep(self._check_interval)
+                logger.error(f"Reconciliation run failed: {e}", exc_info=True)
+            
+            # Wait before next run
+            await asyncio.sleep(self.reconciliation_interval)
     
     def stop(self):
-        """Stop reconciliation engine."""
-        self._running = False
-        logger.info("🛑 Reconciliation Engine stopped")
+        """Stop reconciliation loop."""
+        logger.info("Stopping reconciliation engine...")
+        self.is_running = False
     
-    async def run_reconciliation_cycle(self, db_session: AsyncSession):
-        """Execute one full reconciliation cycle."""
-        logger.debug("🔍 Running reconciliation cycle...")
+    async def run_reconciliation(self, db_session: AsyncSession) -> ReconciliationResult:
+        """
+        Run single reconciliation cycle.
         
-        discrepancies = []
+        Compares database positions with exchange positions and detects mismatches.
         
-        # Check 1: Compare exchange positions vs database positions
-        discrepancies.extend(await self._check_positions(db_session))
-        
-        # Check 2: Verify open orders consistency
-        discrepancies.extend(await self._check_open_orders(db_session))
-        
-        # Check 3: Validate risk engine state
-        discrepancies.extend(await self._check_risk_state(db_session))
-        
-        # Process discrepancies
-        for discrepancy in discrepancies:
-            await self._handle_discrepancy(discrepancy, db_session)
-        
-        if discrepancies:
-            logger.warning(f"⚠️ Reconciliation found {len(discrepancies)} discrepancies")
-        else:
-            logger.debug("✅ Reconciliation: All systems consistent")
-    
-    async def _check_positions(self, db_session: AsyncSession) -> List[ReconciliationDiscrepancy]:
-        """Compare exchange positions with database positions."""
-        discrepancies = []
+        Args:
+            db_session: Database session
+            
+        Returns:
+            ReconciliationResult with detected issues and actions taken
+        """
+        result = ReconciliationResult()
         
         try:
-            # Fetch exchange positions
-            exchange = self.router.get_exchange('DEMO' if self.testnet else 'LIVE')
-            exchange_positions = await exchange.get_positions()
-            exchange_symbols = {p['symbol']: p for p in exchange_positions}
+            # Get open positions from database
+            db_positions = await self._get_db_positions(db_session)
             
-            # Fetch database positions
-            db_positions = await self.position_repo.get_open_positions(db_session)
-            db_symbols = {p.symbol: p for p in db_positions}
+            # Get actual positions from exchange
+            exchange_positions = await self._get_exchange_positions()
             
-            # Case 1: Position in DB but NOT on exchange (Ghost Position)
-            for symbol, db_pos in db_symbols.items():
-                if symbol not in exchange_symbols:
-                    discrepancy = ReconciliationDiscrepancy(
-                        discrepancy_type="GHOST_POSITION",
-                        symbol=symbol,
-                        exchange_state={'size': 0, 'side': 'NONE'},
-                        db_state={'size': db_pos.size, 'side': db_pos.side},
-                        severity="CRITICAL"
-                    )
-                    discrepancies.append(discrepancy)
+            # Detect mismatches
+            await self._detect_orphaned_orders(db_positions, exchange_positions, result, db_session)
+            await self._detect_ghost_positions(db_positions, exchange_positions, result, db_session)
+            await self._detect_status_mismatches(db_positions, exchange_positions, result, db_session)
             
-            # Case 2: Position on exchange but NOT in DB (Missing Record)
-            for symbol, ex_pos in exchange_symbols.items():
-                if symbol not in db_symbols:
-                    discrepancy = ReconciliationDiscrepancy(
-                        discrepancy_type="MISSING_DB_RECORD",
-                        symbol=symbol,
-                        exchange_state=ex_pos,
-                        db_state={'exists': False},
-                        severity="HIGH"
-                    )
-                    discrepancies.append(discrepancy)
-            
-            # Case 3: Size/price mismatches
-            for symbol in set(exchange_symbols.keys()) & set(db_symbols.keys()):
-                ex_pos = exchange_symbols[symbol]
-                db_pos = db_symbols[symbol]
-                
-                size_diff = abs(ex_pos.get('size', 0) - db_pos.size)
-                price_diff = abs(ex_pos.get('entry_price', 0) - db_pos.entry_price)
-                
-                if size_diff > 0.001 or price_diff > 0.01:
-                    discrepancy = ReconciliationDiscrepancy(
-                        discrepancy_type="STATE_MISMATCH",
-                        symbol=symbol,
-                        exchange_state=ex_pos,
-                        db_state={'size': db_pos.size, 'entry_price': db_pos.entry_price},
-                        severity="MEDIUM"
-                    )
-                    discrepancies.append(discrepancy)
-        
-        except Exception as e:
-            logger.error(f"Position check failed: {e}")
-        
-        return discrepancies
-    
-    async def _check_open_orders(self, db_session: AsyncSession) -> List[ReconciliationDiscrepancy]:
-        """Verify open orders match trade records."""
-        discrepancies = []
-        
-        try:
-            exchange = self.router.get_exchange('DEMO' if self.testnet else 'LIVE')
-            open_orders = await exchange.fetch_open_orders()
-            exchange_order_ids = {o.get('id') for o in open_orders if o.get('status') == 'open'}
-            
-            # Get pending orders from DB
-            pending_orders = await self.order_repo.get_pending_orders(db_session)
-            db_order_ids = {o.exchange_order_id for o in pending_orders if o.exchange_order_id}
-            
-            # Orphaned orders in DB
-            orphaned = db_order_ids - exchange_order_ids
-            for order_id in orphaned:
-                discrepancies.append(ReconciliationDiscrepancy(
-                    discrepancy_type="ORPHANED_ORDER",
-                    symbol="UNKNOWN",
-                    exchange_state={'exists': False},
-                    db_state={'order_id': order_id, 'status': 'PENDING'},
-                    severity="HIGH"
-                ))
-        
-        except Exception as e:
-            logger.error(f"Open orders check failed: {e}")
-        
-        return discrepancies
-    
-    async def _check_risk_state(self, db_session: AsyncSession) -> List[ReconciliationDiscrepancy]:
-        """Validate risk engine state matches actual positions."""
-        # This would compare risk engine's tracked exposure vs actual positions
-        # For now, return empty list - can be enhanced later
-        return []
-    
-    async def _handle_discrepancy(self, discrepancy: ReconciliationDiscrepancy, db_session: AsyncSession):
-        """Handle detected discrepancy based on type and severity."""
-        logger.warning(
-            f"⚠️ Discrepancy detected: {discrepancy.discrepancy_type} "
-            f"for {discrepancy.symbol} (Severity: {discrepancy.severity})"
-        )
-        
-        if discrepancy.discrepancy_type == "GHOST_POSITION":
-            await self._handle_ghost_position(discrepancy, db_session)
-        
-        elif discrepancy.discrepancy_type == "MISSING_DB_RECORD":
-            await self._handle_missing_db_record(discrepancy, db_session)
-        
-        elif discrepancy.discrepancy_type == "STATE_MISMATCH":
-            await self._handle_state_mismatch(discrepancy, db_session)
-        
-        elif discrepancy.discrepancy_type == "ORPHANED_ORDER":
-            await self._handle_orphaned_order(discrepancy, db_session)
-    
-    async def _handle_ghost_position(self, discrepancy: ReconciliationDiscrepancy, db_session: AsyncSession):
-        """
-        Handle ghost position: DB shows position but exchange shows none.
-        
-        Recovery Rule:
-        1. Send emergency Telegram alert
-        2. Mark position as closed in DB
-        3. Freeze strategy temporarily
-        4. Log recovery event
-        """
-        logger.critical(f"🚨 GHOST POSITION detected for {discrepancy.symbol}!")
-        
-        # 1. Send Telegram alert
-        await self.notifier.send_message(
-            f"🚨 CRITICAL: Ghost Position Detected\n"
-            f"Symbol: {discrepancy.symbol}\n"
-            f"DB State: {discrepancy.db_state}\n"
-            f"Exchange State: {discrepancy.exchange_state}\n"
-            f"Action: Position marked as closed, strategy frozen"
-        )
-        
-        # 2. Mark position as closed in DB
-        position = await self.position_repo.get_position_by_symbol(discrepancy.symbol, db_session)
-        if position:
-            position.status = 'closed'
-            position.last_sync = datetime.utcnow()
-        
-        # 3. Freeze strategy
-        self.strategy_frozen = True
-        logger.warning(f"❄️ Strategy FROZEN due to ghost position in {discrepancy.symbol}")
-        
-        # 4. Log recovery event
-        from app.database.models import RecoveryEvents
-        recovery_event = RecoveryEvents(
-            recovery_type="GHOST_POSITION",
-            symbol=discrepancy.symbol,
-            exchange="MEXC",  # Or dynamic
-            description=f"Ghost position detected and closed. Strategy frozen.",
-            old_state=str(discrepancy.db_state),
-            new_state=str(discrepancy.exchange_state),
-            auto_repaired=1,
-            requires_manual_review=1
-        )
-        db_session.add(recovery_event)
-        await db_session.commit()
-    
-    async def _handle_missing_db_record(self, discrepancy: ReconciliationDiscrepancy, db_session: AsyncSession):
-        """
-        Handle missing DB record: Exchange has position but DB doesn't.
-        
-        Recovery Rule:
-        1. Recreate position record in DB
-        2. Find or create associated trade
-        3. Send notification
-        """
-        logger.warning(f"📝 Missing DB record for {discrepancy.symbol} - recreating...")
-        
-        ex_pos = discrepancy.exchange_state
-        
-        # Find associated trade or create placeholder
-        trade = await self.trade_repo.get_open_trade_by_symbol(discrepancy.symbol, db_session)
-        
-        if not trade:
-            logger.warning(f"No trade found for {discrepancy.symbol} - creating placeholder")
-            # Create minimal trade record
-            from app.database.models import Trades
-            import uuid
-            trade = Trades(
-                id=str(uuid.uuid4()),
-                mode='DEMO' if self.testnet else 'LIVE',
-                exchange='mexc',
-                symbol=discrepancy.symbol,
-                side='LONG' if ex_pos.get('size', 0) > 0 else 'SHORT',
-                status='OPEN',
-                entry_price=ex_pos.get('entry_price', 0),
-                current_price=ex_pos.get('current_price', 0),
-                leverage=ex_pos.get('leverage', 1),
-                quantity=abs(ex_pos.get('size', 0)),
-                created_at=datetime.utcnow().isoformat()
+            logger.info(
+                f"Reconciliation complete: {result.mismatches_found} mismatches, "
+                f"{result.mismatches_repaired} repaired"
             )
+            
+        except Exception as e:
+            logger.error(f"Reconciliation failed: {e}", exc_info=True)
+            result.errors.append(str(e))
+        
+        return result
+    
+    async def _get_db_positions(self, db_session: AsyncSession) -> List[Dict[str, Any]]:
+        """Get all open positions from database."""
+        stmt = select(PaperTrades).where(
+            PaperTrades.status == 'open',
+            PaperTrades.exchange == self.exchange_name
+        )
+        result = await db_session.execute(stmt)
+        trades = result.scalars().all()
+        
+        positions = []
+        for trade in trades:
+            positions.append({
+                'trade_id': trade.id,
+                'symbol': trade.symbol,
+                'side': trade.side,
+                'quantity': trade.qty,
+                'entry_price': trade.entry_price,
+                'status': trade.status,
+                'notes': trade.notes or '',
+                'ts_open': trade.ts_open
+            })
+        
+        logger.debug(f"Found {len(positions)} open positions in database")
+        return positions
+    
+    async def _get_exchange_positions(self) -> List[Dict[str, Any]]:
+        """Get all open positions from exchange."""
+        try:
+            # Fetch open positions from exchange
+            positions = await self.exchange_manager.get_open_positions()
+            
+            # Normalize position data
+            normalized = []
+            for pos in positions:
+                normalized.append({
+                    'order_id': pos.get('order_id') or pos.get('id'),
+                    'symbol': pos.get('symbol'),
+                    'side': pos.get('side', '').upper(),
+                    'quantity': pos.get('quantity') or pos.get('amount'),
+                    'entry_price': pos.get('price') or pos.get('entry_price'),
+                    'status': pos.get('status', 'open')
+                })
+            
+            logger.debug(f"Found {len(normalized)} open positions on exchange")
+            return normalized
+            
+        except Exception as e:
+            logger.error(f"Failed to fetch exchange positions: {e}")
+            return []
+    
+    async def _detect_orphaned_orders(
+        self,
+        db_positions: List[Dict],
+        exchange_positions: List[Dict],
+        result: ReconciliationResult,
+        db_session: AsyncSession
+    ):
+        """Detect orders in DB but not on exchange (orphaned)."""
+        # Extract order IDs from exchange positions
+        exchange_order_ids = set()
+        for pos in exchange_positions:
+            if pos.get('order_id'):
+                exchange_order_ids.add(pos['order_id'])
+        
+        # Check each DB position
+        for db_pos in db_positions:
+            # Extract order ID from notes
+            order_id = self._extract_order_id_from_notes(db_pos['notes'])
+            
+            if order_id and order_id not in exchange_order_ids:
+                # Found orphaned order
+                result.orphaned_orders.append(db_pos)
+                result.mismatches_found += 1
+                
+                logger.warning(
+                    f"⚠️ Orphaned order detected: Trade {db_pos['trade_id']} "
+                    f"(Order {order_id}) exists in DB but not on exchange"
+                )
+                
+                # Auto-repair if enabled
+                if self.auto_repair_safe:
+                    await self._repair_orphaned_order(db_pos, db_session, result)
+                else:
+                    # Alert for manual review
+                    await self._alert_mismatch('ORPHANED_ORDER', db_pos, result)
+    
+    async def _detect_ghost_positions(
+        self,
+        db_positions: List[Dict],
+        exchange_positions: List[Dict],
+        result: ReconciliationResult,
+        db_session: AsyncSession
+    ):
+        """Detect positions on exchange but not in DB (ghost)."""
+        # Extract symbols from DB positions
+        db_symbols = set()
+        for pos in db_positions:
+            db_symbols.add(pos['symbol'])
+        
+        # Check each exchange position
+        for exc_pos in exchange_positions:
+            if exc_pos['symbol'] not in db_symbols:
+                # Found ghost position
+                result.ghost_positions.append(exc_pos)
+                result.mismatches_found += 1
+                
+                logger.warning(
+                    f"⚠️ Ghost position detected: {exc_pos['symbol']} "
+                    f"exists on exchange but not in DB"
+                )
+                
+                # Import into database
+                await self._import_ghost_position(exc_pos, db_session, result)
+    
+    async def _detect_status_mismatches(
+        self,
+        db_positions: List[Dict],
+        exchange_positions: List[Dict],
+        result: ReconciliationResult,
+        db_session: AsyncSession
+    ):
+        """Detect status mismatches between DB and exchange."""
+        # Build lookup by symbol
+        exc_by_symbol = {}
+        for pos in exchange_positions:
+            exc_by_symbol[pos['symbol']] = pos
+        
+        # Check each DB position
+        for db_pos in db_positions:
+            exc_pos = exc_by_symbol.get(db_pos['symbol'])
+            
+            if exc_pos:
+                # Compare statuses
+                db_status = db_pos['status'].lower()
+                exc_status = exc_pos['status'].lower()
+                
+                if db_status != exc_status:
+                    result.status_mismatches.append({
+                        'db_position': db_pos,
+                        'exchange_position': exc_pos
+                    })
+                    result.mismatches_found += 1
+                    
+                    logger.warning(
+                        f"⚠️ Status mismatch: {db_pos['symbol']} - "
+                        f"DB={db_status}, Exchange={exc_status}"
+                    )
+                    
+                    # Update DB to match exchange
+                    await self._repair_status_mismatch(db_pos, exc_pos, db_session, result)
+    
+    def _extract_order_id_from_notes(self, notes: str) -> Optional[str]:
+        """Extract order ID from trade notes."""
+        if not notes:
+            return None
+        
+        # Look for "Order ID: XXXX" pattern
+        if 'Order ID:' in notes:
+            parts = notes.split('Order ID:')
+            if len(parts) > 1:
+                order_id = parts[1].strip().split(',')[0].strip()
+                return order_id
+        
+        return None
+    
+    async def _repair_orphaned_order(
+        self,
+        db_pos: Dict,
+        db_session: AsyncSession,
+        result: ReconciliationResult
+    ):
+        """Repair orphaned order by marking as failed."""
+        try:
+            stmt = select(PaperTrades).where(PaperTrades.id == db_pos['trade_id'])
+            trade_result = await db_session.execute(stmt)
+            trade = trade_result.scalar_one_or_none()
+            
+            if trade:
+                trade.status = 'failed'
+                trade.trade_status = 'FAILED'
+                trade.notes += f"\n[RECONCILIATION] Orphaned order detected and marked as failed at {datetime.utcnow().isoformat()}"
+                await db_session.flush()
+                
+                result.mismatches_repaired += 1
+                logger.info(f"✅ Repaired orphaned order: Trade {db_pos['trade_id']}")
+                
+        except Exception as e:
+            logger.error(f"Failed to repair orphaned order: {e}")
+            result.errors.append(f"Orphaned order repair failed: {str(e)}")
+    
+    async def _import_ghost_position(
+        self,
+        exc_pos: Dict,
+        db_session: AsyncSession,
+        result: ReconciliationResult
+    ):
+        """Import ghost position into database."""
+        try:
+            # Create new trade record
+            trade = PaperTrades(
+                ts_open=datetime.utcnow().isoformat(),
+                user_id='reconciliation_import',
+                exchange=self.exchange_name,
+                symbol=exc_pos['symbol'],
+                side=exc_pos['side'],
+                leverage=1,  # Default, may need adjustment
+                qty=exc_pos['quantity'],
+                entry_price=exc_pos['entry_price'],
+                exit_price=None,
+                stop_loss=None,
+                take_profit=None,
+                profit=None,
+                profit_pct=None,
+                status='open',
+                trade_status='POSITION_OPEN',
+                notes=f'[RECONCILIATION] Ghost position imported from exchange at {datetime.utcnow().isoformat()}'
+            )
+            
             db_session.add(trade)
             await db_session.flush()
-        
-        # Create position record
-        await self.position_repo.upsert_position({
-            'trade_id': trade.id,
-            'symbol': discrepancy.symbol,
-            'size': ex_pos.get('size', 0),
-            'entry_price': ex_pos.get('entry_price', 0),
-            'current_price': ex_pos.get('current_price', 0),
-            'unrealized_pnl': ex_pos.get('unrealized_pnl', 0),
-            'liquidation_price': ex_pos.get('liquidation_price'),
-            'leverage': ex_pos.get('leverage', 1),
-            'status': 'open',
-            'last_sync': datetime.utcnow(),
-            'sync_source': 'reconciliation_engine'
-        }, db_session)
-        
-        await self.notifier.send_message(
-            f"📝 Reconciliation: Recreated missing position for {discrepancy.symbol}"
-        )
+            
+            result.mismatches_repaired += 1
+            logger.info(f"✅ Imported ghost position: {exc_pos['symbol']} as Trade {trade.id}")
+            
+            # Alert operator
+            await self._alert_mismatch('GHOST_POSITION_IMPORTED', exc_pos, result)
+            
+        except Exception as e:
+            logger.error(f"Failed to import ghost position: {e}")
+            result.errors.append(f"Ghost position import failed: {str(e)}")
     
-    async def _handle_state_mismatch(self, discrepancy: ReconciliationDiscrepancy, db_session: AsyncSession):
-        """Handle state mismatch: Update DB to match exchange."""
-        logger.info(f"🔄 State mismatch for {discrepancy.symbol} - updating DB...")
-        
-        position = await self.position_repo.get_position_by_symbol(discrepancy.symbol, db_session)
-        if position:
-            ex_pos = discrepancy.exchange_state
-            position.size = ex_pos.get('size', 0)
-            position.current_price = ex_pos.get('current_price', 0)
-            position.unrealized_pnl = ex_pos.get('unrealized_pnl', 0)
-            position.last_sync = datetime.utcnow()
-            position.sync_source = 'reconciliation_engine'
-            await db_session.commit()
+    async def _repair_status_mismatch(
+        self,
+        db_pos: Dict,
+        exc_pos: Dict,
+        db_session: AsyncSession,
+        result: ReconciliationResult
+    ):
+        """Repair status mismatch by updating DB to match exchange."""
+        try:
+            stmt = select(PaperTrades).where(PaperTrades.id == db_pos['trade_id'])
+            trade_result = await db_session.execute(stmt)
+            trade = trade_result.scalar_one_or_none()
+            
+            if trade:
+                old_status = trade.status
+                trade.status = exc_pos['status'].lower()
+                trade.notes += f"\n[RECONCILIATION] Status updated from {old_status} to {trade.status} at {datetime.utcnow().isoformat()}"
+                await db_session.flush()
+                
+                result.mismatches_repaired += 1
+                logger.info(
+                    f"✅ Repaired status mismatch: Trade {db_pos['trade_id']} "
+                    f"({old_status} → {trade.status})"
+                )
+                
+        except Exception as e:
+            logger.error(f"Failed to repair status mismatch: {e}")
+            result.errors.append(f"Status mismatch repair failed: {str(e)}")
     
-    async def _handle_orphaned_order(self, discrepancy: ReconciliationDiscrepancy, db_session: AsyncSession):
-        """Handle orphaned order: Mark as canceled in DB."""
-        logger.warning(f"🗑️ Orphaned order detected: {discrepancy.db_state.get('order_id')}")
-        
-        # Update order status to CANCELED
-        # Implementation depends on OrderRepository methods
-        # For now, just log
-        await self.notifier.send_message(
-            f"🗑️ Orphaned order detected and marked for review"
-        )
+    async def _alert_mismatch(
+        self,
+        mismatch_type: str,
+        position_data: Dict,
+        result: ReconciliationResult
+    ):
+        """Send alert for detected mismatch."""
+        try:
+            await self.notifier.send_reconciliation_alert(
+                action=f'{mismatch_type}_DETECTED',
+                symbol=position_data.get('symbol', 'UNKNOWN'),
+                exchange=self.exchange_name,
+                mismatch_type=mismatch_type,
+                requires_review=True
+            )
+            
+            result.mismatches_alerted += 1
+            
+        except Exception as e:
+            logger.error(f"Failed to send reconciliation alert: {e}")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get reconciliation statistics."""
+        return {
+            'is_running': self.is_running,
+            'last_run': self.last_run.isoformat() if self.last_run else None,
+            'total_runs': self.total_runs,
+            'total_mismatches': self.total_mismatches,
+            'reconciliation_interval': self.reconciliation_interval
+        }
