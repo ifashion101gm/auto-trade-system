@@ -14,6 +14,11 @@ Signal → Execution → Verification → Monitoring → Recovery → Reconcilia
 
 ---
 
+
+### Self-Healing Execution Engine
+
+`SelfHealingExecutionEngine` centralizes the closed-loop safety logic used by the live trading service. It coordinates pre-flight health gates, duplicate signal protection, observed execution telemetry, anomaly-based pause decisions, verification-triggered recovery, reconciliation decisions, and consolidated health reporting. The engine is dependency-injected so each agent remains independently testable while production trading receives one consistent healing policy.
+
 ## Architecture Components
 
 ### 6 Specialized Agents

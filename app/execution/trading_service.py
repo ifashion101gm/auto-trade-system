@@ -26,6 +26,7 @@ from app.logging_config import get_logger
 from app.execution.states import ExecutionState, is_valid_transition
 from app.execution.state_validator import state_validator
 from app.events.event_bus import event_bus
+from app.execution.self_healing_engine import SelfHealingExecutionEngine
 
 logger = get_logger(__name__)
 
@@ -155,26 +156,21 @@ class LiveTradingService:
             reconciliation_engine=self.reconciliation_engine
         )
         
-        # Initialize advanced self-healing features
-        from app.execution.dedup_engine import DuplicateProtectionEngine
-        from app.execution.anomaly_detector import AnomalyDetector
-        
-        self.dedup_engine = DuplicateProtectionEngine(
-            redis_client=None,  # TODO: Add Redis when available
-            signal_ttl_seconds=3600,
-            order_ttl_seconds=86400
+        # Initialize self-healing execution engine. Keep direct aliases for
+        # backwards-compatible health/reporting code and existing tests.
+        self.self_healing_engine = SelfHealingExecutionEngine(
+            monitoring_agent=self.monitoring_agent,
+            verification_agent=self.verification_agent,
+            recovery_agent=self.recovery_agent,
+            reconciliation_agent=self.reconciliation_agent,
+            circuit_breaker=self.circuit_breaker,
+            notifier=self.notifier,
+            event_bus=event_bus
         )
+        self.dedup_engine = self.self_healing_engine.dedup_engine
+        self.anomaly_detector = self.self_healing_engine.anomaly_detector
         
-        self.anomaly_detector = AnomalyDetector(
-            window_size=100,
-            latency_threshold_std=3.0,
-            failure_rate_threshold=0.3,
-            slippage_threshold_std=2.5,
-            max_trades_per_hour=20,
-            cooldown_seconds=300
-        )
-        
-        logger.info("✅ Advanced self-healing features initialized (dedup + anomaly detection)")
+        logger.info("✅ Self-healing execution engine initialized (health gates + dedup + anomaly recovery)")
     
     async def _transition_to(self, new_state: ExecutionState):
         """
@@ -187,6 +183,9 @@ class LiveTradingService:
             ValueError: If transition is not valid
         """
         old_state = self.current_state
+        if old_state == new_state:
+            logger.debug(f"State already {new_state.value}; skipping no-op transition")
+            return
         
         # Validate transition using state validator (with audit trail)
         state_validator.validate_execution_transition(
@@ -254,27 +253,21 @@ class LiveTradingService:
         }
         
         try:
-            # Pre-cycle health check via Monitoring Agent
+            # Pre-cycle self-healing health gate. This checks the monitoring
+            # agent and circuit breaker before any market/exchange action.
             await self._transition_to(ExecutionState.IDLE)
             
-            health_check = await self.monitoring_agent.run({
+            health_decision = await self.self_healing_engine.run_preflight({
                 'user_id': user_id,
                 'db_session': db_session,
                 'exchange_manager': self.exchange_manager
             })
             
-            if not health_check.get('can_continue_trading', True):
-                logger.warning("⚠️ Trading blocked by health check")
-                results['status'] = 'blocked_by_health_check'
-                results['health_issues'] = health_check.get('issues', [])
-                return results
-            
-            # Check circuit breaker before starting cycle
-            health_state = await self.circuit_breaker.check_system_health()
-            if not health_state.can_trade:
-                logger.warning(f"⚠️  Trading blocked by circuit breaker: {health_state.reason}")
-                results['status'] = 'blocked'
-                results['circuit_breaker_reason'] = health_state.reason
+            if not health_decision.can_continue:
+                logger.warning("⚠️ Trading blocked by self-healing health gate")
+                results['status'] = health_decision.status
+                results['health_issues'] = health_decision.issues
+                results['self_healing'] = health_decision.to_dict()
                 return results
             
             # Transition: IDLE -> FETCHING_DATA
@@ -363,12 +356,14 @@ class LiveTradingService:
             
             # Duplicate signal check
             logger.info("\n🔒 Checking for duplicate signals...")
-            dedup_result = await self.dedup_engine.check_and_mark_signal(proposal)
+            signal_decision = await self.self_healing_engine.guard_signal(proposal)
+            dedup_result = signal_decision.metadata['deduplication']
             
-            if dedup_result['is_duplicate']:
-                logger.warning(f"⚠️  Duplicate signal detected - rejecting trade")
-                results['status'] = 'duplicate_signal_rejected'
+            if not signal_decision.can_continue:
+                logger.warning("⚠️  Duplicate signal detected - rejecting trade")
+                results['status'] = signal_decision.status
                 results['dedup_hash'] = dedup_result['signal_hash']
+                results['self_healing'] = signal_decision.to_dict()
                 return results
             
             logger.info(f"   ✅ Signal unique (hash: {dedup_result['signal_hash'][:16]}...)")
@@ -420,108 +415,75 @@ class LiveTradingService:
             execution_start = time.time()
             
             try:
-                execution_result = await self._execute_trade(
+                async def _execute_observed_trade():
+                    return await self._execute_trade(
+                        proposal=proposal,
+                        user_id=user_id,
+                        db_session=db_session
+                    )
+
+                execution_result = await self.self_healing_engine.execute_with_observation(
+                    _execute_observed_trade,
                     proposal=proposal,
-                    user_id=user_id,
-                    db_session=db_session
-                )
-                
-                # Record API call success for circuit breaker
-                execution_time_ms = (time.time() - execution_start) * 1000
-                await self.circuit_breaker.record_api_call(
-                    success=True,
-                    latency_ms=execution_time_ms,
                     endpoint='create_market_order'
                 )
-                
-                # Record metrics for anomaly detection
-                self.anomaly_detector.record_latency(execution_time_ms)
-                self.anomaly_detector.record_order_result(True)
-                
-                # Record slippage if order executed
+                execution_time_ms = execution_result.get(
+                    '_self_healing_latency_ms',
+                    (time.time() - execution_start) * 1000
+                )
+
+                # Check for anomalies after the engine records execution telemetry.
                 if execution_result['status'] == 'executed':
-                    slippage_pct = abs(
-                        execution_result.get('filled_price', proposal['entry_price']) - proposal['entry_price']
-                    ) / proposal['entry_price'] * 100
-                    
-                    await self.circuit_breaker.record_fill_slippage(
-                        symbol=symbol,
-                        expected_price=proposal['entry_price'],
-                        actual_price=execution_result.get('filled_price', proposal['entry_price'])
-                    )
-                    
-                    # Record slippage for anomaly detection
-                    self.anomaly_detector.record_slippage(slippage_pct)
-                    
-                    # Check for anomalies
-                    anomalies = self.anomaly_detector.run_comprehensive_check(
-                        current_latency_ms=execution_time_ms,
-                        current_slippage_pct=slippage_pct
-                    )
+                    anomalies = execution_result.get('_self_healing_anomalies', [])
                     
                     if anomalies:
-                        logger.warning(f"⚠️ Anomalies detected during execution:")
+                        logger.warning("⚠️ Anomalies detected during execution:")
                         for anomaly in anomalies:
                             logger.warning(f"  [{anomaly['severity']}] {anomaly['message']}")
                         
-                        # Store anomalies in results
                         results['anomalies'] = anomalies
                         
-                        # If critical anomaly, consider pausing trading
-                        critical_anomalies = [a for a in anomalies if a['severity'] == 'CRITICAL']
-                        if critical_anomalies:
-                            logger.error("🚨 Critical anomalies detected - may need to pause trading")
+                        if self.self_healing_engine.should_pause_for_anomalies(anomalies):
+                            critical_anomalies = [
+                                a for a in anomalies
+                                if a['severity'] in self.self_healing_engine.critical_anomaly_severities
+                            ]
+                            logger.error("🚨 Critical anomalies detected - pausing trading")
                             results['status'] = 'paused_due_to_anomalies'
                             results['critical_anomalies'] = critical_anomalies
                             return results
-                    
-                    # Record trade for overtrading detection
-                    self.anomaly_detector.record_trade(symbol, proposal['side'])
                 
-            except Exception as e:
-                # Record API failure for circuit breaker
-                execution_time_ms = (time.time() - execution_start) * 1000
-                await self.circuit_breaker.record_api_call(
-                    success=False,
-                    latency_ms=execution_time_ms,
-                    endpoint='create_market_order'
-                )
-                
-                # Record failure for anomaly detection
-                self.anomaly_detector.record_latency(execution_time_ms)
-                self.anomaly_detector.record_order_result(False)
-                
+            except Exception:
                 raise
             
             results['stages']['execution'] = execution_result['status']
             results['execution'] = execution_result
             
             if execution_result['status'] == 'executed':
-                # Post-execution verification via Verification Agent
+                # Post-execution verification and self-healing recovery.
                 logger.info("\n🔍 Verifying execution...")
-                verification_result = await self.verification_agent.run({
-                    'execution_result': execution_result,
-                    'proposal': proposal,
-                    'db_session': db_session
-                })
-                
-                results['agents'] = results.get('agents', {})
-                results['agents']['verification'] = verification_result
-                
-                if not verification_result.get('verification_passed'):
-                    logger.warning("⚠️ Verification failed - triggering recovery")
-                    
-                    recovery_result = await self.recovery_agent.run({
-                        'issues': [{
-                            'type': 'verification_failed',
-                            'details': verification_result.get('checks')
-                        }],
+                verification_decision = await self.self_healing_engine.verify_and_recover(
+                    execution_result=execution_result,
+                    proposal=proposal,
+                    context={
                         'user_id': user_id,
                         'db_session': db_session
-                    })
-                    results['agents']['recovery'] = recovery_result
-                    
-                    results['status'] = 'verification_failed_recovered'
+                    }
+                )
+                
+                results['agents'] = results.get('agents', {})
+                results['agents']['verification'] = verification_decision.metadata.get('verification')
+                if 'recovery' in verification_decision.metadata:
+                    results['agents']['recovery'] = verification_decision.metadata['recovery']
+                
+                if not verification_decision.can_continue:
+                    logger.warning("⚠️ Verification failed and recovery could not fully repair state")
+                    results['status'] = verification_decision.status
+                    results['self_healing'] = verification_decision.to_dict()
+                    return results
+                if verification_decision.status != 'verification_passed':
+                    results['self_healing'] = verification_decision.to_dict()
+                    results['status'] = verification_decision.status
                     return results
                 
                 # Transition: VALIDATING -> EXECUTING -> MONITORING
@@ -553,12 +515,15 @@ class LiveTradingService:
             if db_session:
                 logger.info("\n🔄 Running post-cycle reconciliation...")
                 try:
-                    reconciliation_result = await self.reconciliation_agent.run({
+                    reconciliation_decision = await self.self_healing_engine.reconcile({
                         'user_id': user_id,
                         'db_session': db_session
                     })
+                    reconciliation_result = reconciliation_decision.metadata.get('reconciliation', reconciliation_decision.to_dict())
                     results['agents'] = results.get('agents', {})
                     results['agents']['reconciliation'] = reconciliation_result
+                    if not reconciliation_decision.can_continue:
+                        results['self_healing_reconciliation'] = reconciliation_decision.to_dict()
                     
                     await self._transition_to(ExecutionState.RECONCILING)
                     await self._transition_to(ExecutionState.IDLE)
@@ -1189,15 +1154,7 @@ class LiveTradingService:
         Returns:
             Dictionary with system health metrics
         """
-        return {
-            'timestamp': datetime.utcnow().isoformat(),
-            'anomaly_detection': {
-                'baselines': self.anomaly_detector.get_baseline_stats(),
-                'alerts_triggered': self.anomaly_detector.alert_counts
-            },
-            'deduplication': await self.dedup_engine.get_stats(),
-            'circuit_breaker': await self.circuit_breaker.check_system_health()
-        }
+        return await self.self_healing_engine.get_health_report()
     
     async def execute_dual_gold_trade(
         self,
