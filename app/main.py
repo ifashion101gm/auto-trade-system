@@ -69,9 +69,8 @@ async def lifespan(app: FastAPI):
     
     # Subscribe EventStore to persist critical events
     async def persist_critical_events(event):
-        async for db_session in get_session():
+        async with get_session() as db_session:
             await event_store.persist_event(event, db_session)
-            break
     
     # Subscribe to all critical event types
     from app.events.event_types import (
@@ -94,9 +93,8 @@ async def lifespan(app: FastAPI):
     
     # Run recovery
     logger.info("🔄 Running startup recovery checks...")
-    async for db_session in get_session():
+    async with get_session() as db_session:
         await recovery_service.recover_on_startup(db_session)
-        break
     logger.info("✅ Startup recovery completed")
     
     # Start sync agent with WebSocket (Bybit Demo Trading)
@@ -113,10 +111,9 @@ async def lifespan(app: FastAPI):
     async def reconciliation_loop():
         while True:
             try:
-                async for db_session in get_session():
+                async with get_session() as db_session:
                     await reconciliation_service.reconcile(mode='DEMO', db_session=db_session)
                     await reconciliation_service.reconcile(mode='LIVE', db_session=db_session)
-                    break
             except Exception as e:
                 logger.error(f"Reconciliation error: {e}", exc_info=True)
             await asyncio.sleep(120)
@@ -208,7 +205,7 @@ async def _get_current_pnl() -> Dict[str, float]:
 async def _get_win_rate() -> float:
     """Calculate win rate from recent trades."""
     try:
-        async for session in get_session():
+        async with get_session() as session:
             stmt = select(PaperTrades).where(
                 PaperTrades.status == 'closed',
                 PaperTrades.ts_close >= datetime.utcnow() - timedelta(days=7)
@@ -233,7 +230,7 @@ async def _get_current_drawdown() -> float:
 async def _get_total_trades_count() -> int:
     """Get total trade count."""
     try:
-        async for session in get_session():
+        async with get_session() as session:
             stmt = select(func.count()).select_from(PaperTrades)
             result = await session.execute(stmt)
             return result.scalar() or 0
@@ -289,7 +286,7 @@ async def _check_api_connectivity() -> Dict[str, bool]:
 async def _check_database_health() -> Dict[str, Any]:
     """Check database health."""
     try:
-        async for session in get_session():
+        async with get_session() as session:
             await session.execute(select(1))
             return {"status": "healthy", "response_time_ms": 0}
     except Exception as e:

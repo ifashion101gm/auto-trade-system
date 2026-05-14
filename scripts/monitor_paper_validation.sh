@@ -113,8 +113,8 @@ while true; do
     generate_report
     
     # Check if target duration reached
-    local elapsed=$(( $(date +%s) - START_TIME ))
-    local hours=$(( elapsed / 3600 ))
+    elapsed=$(( $(date +%s) - START_TIME ))
+    hours=$(( elapsed / 3600 ))
     
     if [ "$hours" -ge "$TARGET_HOURS" ]; then
         echo "" | tee -a "$VALIDATION_LOG"

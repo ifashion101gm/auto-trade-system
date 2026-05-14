@@ -393,6 +393,11 @@ class BybitConnector(BaseExchange):
             logger.error(f"❌ Get positions failed: {error_info['message']}")
             raise
     
+    # Compatibility alias for legacy modules
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Alias for get_positions() to support legacy calls."""
+        return await self.get_positions()
+    
     # =========================================================================
     # Error Handling Methods (Required by BaseExchange)
     # =========================================================================

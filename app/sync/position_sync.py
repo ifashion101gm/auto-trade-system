@@ -73,11 +73,11 @@ class PositionSyncService:
         
         while self._running:
             try:
-                async for db_session in db_session_factory():
+                # Use a single session for the sync cycle
+                async with db_session_factory() as db_session:
                     await self.sync_once(db_session)
                     # Reset failure counter on success
                     consecutive_db_failures = 0
-                    break  # Only need one iteration from the generator
                 
                 # Normal sync interval
                 await asyncio.sleep(self._sync_interval)
@@ -128,9 +128,8 @@ class PositionSyncService:
             # Import db session factory dynamically to avoid circular imports
             from app.database.connection import get_session
             
-            async for db_session in get_session():
+            async with get_session() as db_session:
                 await self.sync_once(db_session)
-                break  # Only need one iteration
             
             logger.info("✅ Immediate sync completed after WebSocket reconnect")
         except Exception as e:

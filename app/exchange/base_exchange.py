@@ -134,6 +134,11 @@ class BaseExchange(ABC):
         """Get all open positions."""
         pass
     
+    # Compatibility alias for legacy modules
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Alias for get_positions() to support legacy calls."""
+        return await self.get_positions()
+    
     @abstractmethod
     async def close_position(self, symbol: str) -> Dict[str, Any]:
         """Close an existing position."""

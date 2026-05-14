@@ -94,6 +94,9 @@ async def init_db():
             raise
 
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
 async def get_session() -> AsyncSession:
     """
     Dependency for getting async database sessions with robust error handling.
