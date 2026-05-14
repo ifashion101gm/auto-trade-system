@@ -130,8 +130,13 @@ class BaseExchange(ABC):
     # =========================================================================
     
     @abstractmethod
+    async def fetch_positions(self) -> List[Dict[str, Any]]:
+        """Fetch all open positions from exchange."""
+        pass
+    
+    @abstractmethod
     async def get_positions(self) -> List[Dict[str, Any]]:
-        """Get all open positions."""
+        """Get all open positions (alias for fetch_positions)."""
         pass
     
     # Compatibility alias for legacy modules

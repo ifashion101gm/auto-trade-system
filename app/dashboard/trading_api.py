@@ -1160,3 +1160,129 @@ def validate_tradingview_payload(data: dict) -> tuple:
     except Exception as e:
         logger.error(f"Payload validation error: {e}")
         return None, f"Validation error: {str(e)}"
+
+
+@router.post("/debug/test-order")
+async def test_order(
+    request: Request,
+    symbol: str = "XAU/USDT:USDT",
+    side: str = "BUY",
+    quantity: float = 0.01,
+    auth: str = None,
+    db_session: AsyncSession = Depends(get_session),
+    notifier: TelegramNotifier = Depends(get_telegram_notifier)
+):
+    """
+    Force execute a test trade to verify end-to-end pipeline.
+    
+    Creates fake signal → passes risk checks → sends order → saves DB → triggers reconciliation
+    """
+    # Verify authentication
+    verify_trading_secret(auth)
+    
+    logger.info("[DEBUG] Starting forced test order...")
+    
+    try:
+        # Step 1: Create synthetic signal
+        from app.strategy.signal_proposal import SignalProposal
+        signal = SignalProposal(
+            symbol=symbol,
+            side=side.upper(),
+            entry_price=0.0,  # Will be filled by market
+            stop_loss=0.0,
+            take_profit=0.0,
+            quantity=quantity,
+            leverage=2,
+            confidence=0.95,
+            strategy_name='debug_test',
+            regime='Test'
+        )
+        
+        logger.info(f"[DEBUG] Created test signal: {signal.to_dict()}")
+        
+        # Step 2: Risk check
+        from app.risk.risk_engine import RiskEngine
+        risk_engine = RiskEngine(db_session=db_session)
+        risk_decision = await risk_engine.check_trade_approval(
+            proposal=signal.to_dict(),
+            user_id='debug_user'
+        )
+        
+        if not risk_decision.approved:
+            logger.warning(f"[RISK] Test order rejected: {risk_decision.violations}")
+            return {
+                "status": "rejected",
+                "violations": risk_decision.violations,
+                "risk_score": risk_decision.risk_score
+            }
+        
+        logger.info("[RISK] Test order approved")
+        
+        # Step 3: Execute order
+        from app.infra.exchange_manager import UnifiedExchangeManager
+        exchange_mgr = UnifiedExchangeManager()
+        
+        order_result = await exchange_mgr.create_market_order(
+            symbol=signal.symbol,
+            side=signal.side.lower(),
+            amount=signal.quantity,
+            leverage=signal.leverage
+        )
+        
+        logger.info(f"[ORDER_SENT] {symbol} {side} {quantity} → Order ID: {order_result.get('order_id')}")
+        
+        # Step 4: Save to database
+        from app.database.models import PaperTrades
+        from datetime import datetime
+        
+        trade = PaperTrades(
+            user_id='debug_user',
+            symbol=signal.symbol,
+            side=signal.side,
+            entry_price=order_result.get('price', 0),
+            qty=signal.quantity,
+            leverage=signal.leverage,
+            status='open',
+            ts_open=datetime.utcnow().isoformat(),
+            strategy='debug_test',
+            notes='Forced test order via /debug/test-order endpoint'
+        )
+        
+        db_session.add(trade)
+        await db_session.commit()
+        await db_session.refresh(trade)
+        
+        logger.info(f"[DB_SAVE] Trade saved: ID={trade.id}")
+        
+        # Step 5: Send notification
+        await notifier.send_message(
+            f"🧪 DEBUG TEST ORDER\n\n"
+            f"Symbol: {symbol}\n"
+            f"Side: {side}\n"
+            f"Quantity: {quantity}\n"
+            f"Order ID: {order_result.get('order_id')}\n"
+            f"Trade ID: {trade.id}\n"
+            f"Status: EXECUTED"
+        )
+        
+        return {
+            "status": "executed",
+            "order_id": order_result.get('order_id'),
+            "trade_id": trade.id,
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "price": order_result.get('price'),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"[DEBUG] Test order failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/metrics/validation")
+async def get_validation_metrics():
+    """Get validation metrics dashboard data."""
+    from app.monitoring.metrics_collector import metrics_collector
+    return metrics_collector.get_summary()

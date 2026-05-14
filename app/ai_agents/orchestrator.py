@@ -283,7 +283,11 @@ class AIAgentOrchestrator:
         
         try:
             regime = await self.detect_regime(market_data)
+            logger.info(f"[REGIME] Detected market regime: {regime}")
+            
             strategy = await self.select_strategy(market_data)
+            logger.info(f"[STRATEGY] Selected strategy: {strategy.get('strategy_name', 'N/A')}")
+            
             risk = await self.assess_risk({})
             
             elapsed_ms = (time.time() - start_time) * 1000

@@ -48,6 +48,7 @@ sync_agent = SyncAgent()
 recovery_service = RecoveryService()
 reconciliation_service = ReconciliationService()
 position_sync_service = None  # Will be initialized on startup
+heartbeat_monitor = None  # Will be initialized on startup
 telegram_agent = None  # Will be initialized on startup
 
 
@@ -121,6 +122,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(reconciliation_loop())
     logger.info("✅ Reconciliation loop started")
     
+    # Start heartbeat monitor
+    global heartbeat_monitor
+    from app.heartbeat_monitor import HeartbeatMonitor
+    heartbeat_monitor = HeartbeatMonitor()
+    logger.info("💓 Starting heartbeat monitor (30s interval)...")
+    asyncio.create_task(heartbeat_monitor.start())
+    logger.info("✅ Heartbeat monitor started")
+    
     # Start position sync service (every 5 seconds) - Bybit Demo Trading
     global position_sync_service
     position_sync_service = PositionSyncService(testnet=True)  # Testnet flag for Bybit demo
@@ -144,6 +153,11 @@ async def lifespan(app: FastAPI):
         position_sync_service.stop()
         await position_sync_service.close()
         logger.info("✅ Position sync service stopped")
+    
+    # Stop heartbeat monitor
+    if heartbeat_monitor:
+        await heartbeat_monitor.stop()
+        logger.info("✅ Heartbeat monitor stopped")
     
     await sync_agent.stop()
     logger.info("✅ Sync agent stopped")

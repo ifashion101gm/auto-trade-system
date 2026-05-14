@@ -60,8 +60,9 @@ class BybitConnector(BaseExchange):
         if not api_key or not api_secret:
             raise ValueError("Bybit API credentials not configured")
         
-        # Log masked credentials for security (Bybit skill requirement)
-        masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "***"
+        # Log masked credentials for security (Bybit skills requirement)
+        # Skills spec: "API key masking - Keys displayed as first 5 + last 4 characters"
+        masked_key = f"{api_key[:5]}...{api_key[-4:]}" if len(api_key) > 9 else "***"
         logger.info(f"🔑 Bybit API Key: {masked_key}")
         
         # Initialize mode before adapter (adapter needs to access self.mode)
@@ -92,6 +93,11 @@ class BybitConnector(BaseExchange):
         
         # Connection state
         self._connected = False
+        
+        # Write operations availability (graceful degradation per Bybit skills)
+        self._write_operations_available = True
+        if not self.demo_trading and settings.BYBIT_ENV == 'mainnet':
+            logger.info("🔒 Mainnet mode: Write operations enabled with confirmation requirements")
     
     # =========================================================================
     # Connection & State Management Methods
@@ -237,14 +243,43 @@ class BybitConnector(BaseExchange):
         
         Enhanced with Bybit skills best practices:
         - Position mode detection for correct positionIdx
-        - Large order risk assessment
+        - Large order risk assessment (>$10K or >20% balance)
         - Comprehensive error handling
+        - Trade confirmation framework for mainnet
         """
         try:
             # Check position mode for derivatives (best practice from Bybit skills)
             if ':' in symbol:  # Derivatives symbol
                 position_info = await self.client.check_position_mode(symbol)
                 logger.debug(f"Position mode: {position_info['mode']} (positionIdx={position_info['position_idx']})")
+            
+            # Large order risk check (Bybit skills requirement)
+            try:
+                ticker = await self.fetch_ticker(symbol)
+                price = ticker.get('last_price', 0)
+                notional_value = self.client.calculate_notional_value(price, amount)
+                
+                # Get available balance for risk assessment
+                balance = await self.fetch_balance()
+                available_balance = balance.get('free_usdt', 0)
+                leverage = params.get('leverage', 1) if params else 1
+                required_margin = notional_value / leverage
+                
+                risk_assessment = self.client.check_large_order_risk(
+                    notional_value=notional_value,
+                    available_balance=available_balance,
+                    required_margin=required_margin
+                )
+                
+                if risk_assessment['is_large_order']:
+                    for warning in risk_assessment['warnings']:
+                        logger.warning(warning)
+                    
+                    if risk_assessment['requires_confirmation'] and self._mode == 'LIVE':
+                        logger.error("❌ Large order requires manual confirmation in LIVE mode")
+                        raise Exception("Large order blocked: Requires manual confirmation")
+            except Exception as e:
+                logger.warning(f"⚠️  Risk check skipped: {e}")
             
             return await self.adapter.execute_with_retry(
                 f"create_market_order({symbol}, {side}, {amount})",

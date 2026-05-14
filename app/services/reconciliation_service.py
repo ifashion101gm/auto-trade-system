@@ -112,6 +112,13 @@ class PositionReconciliationService:
                 f"Exchange positions: {len(result.exchange_positions)}"
             )
             
+            # Lifecycle log: Reconciliation check
+            logger.info(
+                f"[RECONCILE] DB: {len(result.db_positions)} | "
+                f"Exchange: {len(result.exchange_positions)} | "
+                f"Synced: {result.is_synced}"
+            )
+            
             # Step 2: Identify mismatches
             await self._identify_discrepancies(result)
             
@@ -417,13 +424,27 @@ class PositionReconciliationService:
 
 class ReconciliationService:
     """
-    Simple reconciliation service wrapper for main.py compatibility.
-    Provides the reconcile() method expected by the application.
+    Production reconciliation service that performs full DB vs Exchange comparison.
     """
     
     def __init__(self):
-        self.position_reconciliation = None  # Will be initialized when needed
-        logger.info("✅ ReconciliationService initialized")
+        self.exchange_manager = None  # Initialize when needed
+        self.event_bus = None
+        self.position_reconciliation = None
+    
+    async def _ensure_initialized(self):
+        """Lazy initialization of dependencies."""
+        if not self.position_reconciliation:
+            from app.infra.exchange_manager import UnifiedExchangeManager
+            from app.events.event_bus import event_bus
+            
+            self.exchange_manager = UnifiedExchangeManager()
+            self.event_bus = event_bus
+            self.position_reconciliation = PositionReconciliationService(
+                exchange_manager=self.exchange_manager,
+                event_bus=self.event_bus,
+                sync_tolerance_pct=0.01
+            )
     
     async def reconcile(self, mode: str = 'DEMO', db_session = None):
         """
@@ -433,13 +454,36 @@ class ReconciliationService:
             mode: Trading mode ('DEMO' or 'LIVE')
             db_session: Database session
         """
+        await self._ensure_initialized()
+        
         try:
-            logger.info(f"🔄 Running {mode} mode reconciliation...")
+            logger.info(f"[RECONCILE] Starting {mode} mode reconciliation...")
             
-            # For now, just log that reconciliation ran
-            # In a full implementation, this would use PositionReconciliationService
-            logger.info(f"✅ {mode} mode reconciliation complete")
+            # Use default user for now
+            user_id = "default_user"
+            
+            result = await self.position_reconciliation.reconcile_positions(
+                user_id=user_id,
+                db_session=db_session,
+                auto_repair=True
+            )
+            
+            logger.info(
+                f"[RECONCILE] {mode} complete | "
+                f"DB: {len(result.db_positions)} | "
+                f"Exchange: {len(result.exchange_positions)} | "
+                f"Orphaned: {len(result.orphaned_positions)} | "
+                f"Ghost: {len(result.ghost_positions)} | "
+                f"Repaired: {result.repaired_count} | "
+                f"Synced: {result.is_synced}"
+            )
+            
+            if not result.is_synced:
+                logger.warning(
+                    f"[RECONCILE] ⚠️ Mismatches detected in {mode} mode - "
+                    f"see logs for details"
+                )
             
         except Exception as e:
-            logger.error(f"❌ Reconciliation failed for {mode} mode: {e}")
+            logger.error(f"[RECONCILE] ❌ Failed for {mode} mode: {e}", exc_info=True)
             raise

@@ -81,16 +81,18 @@ class BybitClient:
         if self.demo_trading:
             # Bybit Demo Trading MUST use Pybit SDK
             # Official documentation: https://bybit-exchange.github.io/docs/v5/demo
-            # IMPORTANT: For demo trading, testnet parameter should be FALSE
-            # Demo trading uses api-demo.bybit.com which is separate from testnet
+            # IMPORTANT: Demo trading requires custom domain configuration
             self.use_pybit = True
             from pybit.unified_trading import HTTP as PybitHTTP
 
+            # Configure for demo trading using Pybit's native demo parameter
+            # Pybit automatically constructs: https://api-demo.bybit.com when demo=True
+            # See: https://github.com/bybit-exchange/pybit/blob/master/pybit/_http_manager.py
             self.pybit_session = PybitHTTP(
-                testnet=False,  # CRITICAL: Must be False for demo trading
-                demo=True,      # Enable demo trading mode (api-demo.bybit.com)
                 api_key=self.api_key,
                 api_secret=self.api_secret,
+                recv_window=settings.BYBIT_RECV_WINDOW,
+                demo=True  # Pybit native demo mode - uses api-demo.bybit.com
             )
             logger.info("✅ Bybit Client initialized (DEMO TRADING - Pybit SDK)")
             logger.info("   Domain: https://api-demo.bybit.com")
@@ -155,6 +157,45 @@ class BybitClient:
         """Close exchange connection."""
         if hasattr(self, 'exchange') and self.exchange:
             await self.exchange.close()
+    
+    async def _convert_symbol_to_bybit_format(self, symbol: str, category: str = "linear") -> str:
+        """
+        Convert CCXT symbol format to Bybit API format.
+        
+        Based on official Bybit V5 API specifications:
+        - Linear perpetuals: BTCUSDT, ETHUSDT, XAUUSDT
+        - Inverse perpetuals: BTCUSD, ETHUSD
+        - Spot: BTCUSDT, ETHUSDT
+        
+        Args:
+            symbol: CCXT format (e.g., 'BTC/USDT:USDT', 'XAU/USDT:USDT')
+            category: Product category ('linear', 'inverse', 'spot', 'option')
+            
+        Returns:
+            Bybit API format (e.g., 'BTCUSDT', 'XAUUSDT')
+        """
+        try:
+            # Try to use CCXT market info first (most reliable)
+            markets = await self.exchange.load_markets()
+            if symbol in markets:
+                market = markets[symbol]
+                bybit_id = market.get('id')
+                if bybit_id:
+                    logger.debug(f"Symbol conversion via market info: {symbol} -> {bybit_id}")
+                    return bybit_id
+        except Exception as e:
+            logger.debug(f"Market info lookup failed for {symbol}: {e}, using fallback conversion")
+        
+        # Fallback to manual conversion
+        # Remove CCXT delimiters
+        bybit_symbol = symbol.replace('/', '').replace(':', '')
+        
+        # Handle double USDT suffix (e.g., XAUUSDTUSDT -> XAUUSDT)
+        if bybit_symbol.endswith('USDTUSDT'):
+            bybit_symbol = bybit_symbol[:-4]
+        
+        logger.debug(f"Symbol conversion (fallback): {symbol} -> {bybit_symbol}")
+        return bybit_symbol
     
     def _handle_pybit_error(self, response: Dict, operation: str):
         """Handle Pybit API errors with Bybit-specific error codes.
@@ -353,6 +394,9 @@ class BybitClient:
             Exception: With Bybit-specific error codes and messages
         """
         try:
+            # Validate clock sync before private API call (Bybit V5 best practice)
+            await self.validate_clock_sync()
+            
             # Use Pybit for demo trading, CCXT for testnet/mainnet
             if self.use_pybit:
                 # Pybit get_wallet_balance returns synchronous response
@@ -686,17 +730,17 @@ class BybitClient:
             Exception: With Bybit-specific error codes and messages
         """
         try:
+            # Validate clock sync before private API call (Bybit V5 best practice)
+            await self.validate_clock_sync()
+            
             # Set leverage (same for both Pybit and CCXT)
             if leverage > 1:
                 await self.set_leverage(symbol, leverage)
             
             # Use Pybit for demo trading, CCXT for testnet/mainnet
             if self.use_pybit:
-                # Convert symbol format: XAU/USDT:USDT -> XAUUSDT, BTC/USDT:USDT -> BTCUSDT
-                bybit_symbol = symbol.replace('/', '').replace(':', '')
-                # Remove duplicate USDT if present (e.g., XAUUSDTUSDT -> XAUUSDT)
-                if bybit_symbol.endswith('USDTUSDT'):
-                    bybit_symbol = bybit_symbol[:-4]
+                # Convert symbol format using standardized method
+                bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
                 
                 # Pybit place_order returns synchronous response
                 response = self.pybit_session.place_order(
@@ -704,7 +748,8 @@ class BybitClient:
                     symbol=bybit_symbol,
                     side="Buy" if side.lower() == "buy" else "Sell",
                     orderType="Market",
-                    qty=str(amount)
+                    qty=str(amount),
+                    leverage=leverage  # Include leverage per V5 API spec
                 )
                 self._handle_pybit_error(response, "place_order")
                 
@@ -831,7 +876,8 @@ class BybitClient:
         side: str,
         amount: float,
         price: float,
-        leverage: int = 1
+        leverage: int = 1,
+        time_in_force: str = "GTC"  # Good Till Cancel (V5 API requirement)
     ) -> Dict[str, Any]:
         """
         Place a limit order.
@@ -842,17 +888,62 @@ class BybitClient:
             amount: Quantity
             price: Limit price
             leverage: Leverage multiplier
+            time_in_force: Time in force ('GTC', 'IOC', 'FOK') per V5 API spec
             
         Returns:
             Order details
         """
         try:
+            # Validate clock sync before private API call
+            await self.validate_clock_sync()
+            
             # Set leverage
             if leverage > 1:
-                await self.exchange.set_leverage(leverage, symbol)
+                await self.set_leverage(symbol, leverage)
             
-            # Place limit order
-            order = await self.exchange.create_limit_order(symbol, side, amount, price)
+            # Use Pybit for demo trading, CCXT for testnet/mainnet
+            if self.use_pybit:
+                # Convert symbol format using standardized method
+                bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
+                
+                # Pybit place_order returns synchronous response
+                response = self.pybit_session.place_order(
+                    category="linear",
+                    symbol=bybit_symbol,
+                    side="Buy" if side.lower() == "buy" else "Sell",
+                    orderType="Limit",
+                    qty=str(amount),
+                    price=str(price),
+                    timeInForce=time_in_force,  # Required by V5 API
+                    leverage=leverage
+                )
+                self._handle_pybit_error(response, "place_order")
+                
+                result = response.get('result', {})
+                
+                order = {
+                    'order_id': result.get('orderId'),
+                    'symbol': result.get('symbol'),
+                    'side': side.lower(),
+                    'type': 'limit',
+                    'amount': amount,
+                    'price': price,
+                    'status': 'open',
+                    'filled': 0,
+                    'remaining': amount,
+                    'cost': 0,
+                    'fee': {},
+                    'timestamp': result.get('createdTime'),
+                    'leverage': leverage,
+                    'time_in_force': time_in_force
+                }
+                
+                logger.info(f"✅ Limit order placed (Pybit Demo): {order['order_id']} - {side} {amount} @ {price} {symbol}")
+                return order
+            else:
+                # CCXT for testnet/mainnet
+                # Place limit order
+                order = await self.exchange.create_limit_order(symbol, side, amount, price)
             
             return {
                 'order_id': order['id'],
@@ -923,11 +1014,8 @@ class BybitClient:
             try:
                 # Use Pybit for demo trading, CCXT for testnet/mainnet
                 if self.use_pybit:
-                    # Convert symbol format: XAU/USDT:USDT -> XAUUSDT
-                    bybit_symbol = symbol.replace('/', '').replace(':', '')
-                    # Remove duplicate USDT if present (e.g., XAUUSDTUSDT -> XAUUSDT)
-                    if bybit_symbol.endswith('USDTUSDT'):
-                        bybit_symbol = bybit_symbol[:-4]
+                    # Convert symbol format using standardized method
+                    bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
                     
                     # Pybit cancel_order returns synchronous response
                     response = self.pybit_session.cancel_order(
@@ -1020,10 +1108,8 @@ class BybitClient:
                 # Pybit v5 requires symbol or settleCoin parameter
                 params = {"category": "linear"}
                 if symbol:
-                    # Convert symbol format: XAU/USDT:USDT -> XAUUSDT
-                    bybit_symbol = symbol.replace('/', '').replace(':', '')
-                    if bybit_symbol.endswith('USDTUSDT'):
-                        bybit_symbol = bybit_symbol[:-4]
+                    # Convert symbol format using standardized method
+                    bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
                     params["symbol"] = bybit_symbol
                 else:
                     # Without symbol filter, use settleCoin to get all USDT positions

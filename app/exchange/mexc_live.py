@@ -5,6 +5,7 @@ Now uses MexcExecutor for proper position-side handling.
 Wrapped with ExchangeAdapter for circuit breaker and rate limiting.
 """
 import asyncio
+from typing import Dict, Any, List
 from app.exchange.base_exchange import BaseExchange
 from app.exchange.mexc_executor import MexcExecutor
 from app.exchange.exchange_adapter import ExchangeAdapter
@@ -196,6 +197,14 @@ class MEXCLiveExchange(BaseExchange):
     async def get_positions(self):
         """Get all open positions."""
         return await self.executor.get_open_positions()
+    
+    async def fetch_positions(self) -> List[Dict[str, Any]]:
+        """Compatibility alias for get_positions()."""
+        return await self.get_positions()
+    
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Alias for get_positions()."""
+        return await self.get_positions()
     
     async def close_position(self, symbol: str, trade_id: str = None):
         """Close an existing position."""

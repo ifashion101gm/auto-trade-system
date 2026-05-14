@@ -218,7 +218,7 @@ class SyncAgent:
         """
         while self.running:
             try:
-                async for db_session in db_session_factory():
+                async with db_session_factory() as db_session:
                     from app.services.reconciliation_service import ReconciliationService
                     recon_service = ReconciliationService()
                     
@@ -228,8 +228,6 @@ class SyncAgent:
                     
                     # Enhanced: Check for orphaned orders
                     await self._detect_orphaned_orders(db_session)
-                    
-                    break
             except Exception as e:
                 logger.error(f"Reconciliation error: {e}")
             

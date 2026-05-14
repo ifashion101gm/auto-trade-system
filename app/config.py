@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     BYBIT_USE_DEMO_DOMAIN: bool = False  # Use api-demo.bybit.com instead of api.bybit.com
     
     # Bybit Client Configuration
-    BYBIT_CLIENT_LIBRARY: str = "ccxt"  # Options: "ccxt" (default), "pybit" (official SDK)
+    BYBIT_CLIENT_LIBRARY: str = "pybit"  # Required: "pybit" (official SDK) - CCXT does NOT support Demo Trading
     BYBIT_RATE_LIMIT_ENABLED: bool = True
     BYBIT_RATE_LIMIT_CALLS_PER_SECOND: int = 10  # Bybit default: 10 requests/sec for authenticated endpoints
     BYBIT_CATEGORY: str = "linear"  # Options: "linear", "inverse", "spot", "option"

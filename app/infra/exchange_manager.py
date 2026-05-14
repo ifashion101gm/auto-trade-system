@@ -141,6 +141,18 @@ class UnifiedExchangeManager:
         """Fetch all open positions."""
         return await self.client.fetch_open_positions()
     
+    async def fetch_positions(self) -> List[Dict[str, Any]]:
+        """Fetch positions from active exchange."""
+        return await self.client.fetch_positions()
+    
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        """Get positions from active exchange."""
+        return await self.client.get_positions()
+    
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Get open positions from active exchange."""
+        return await self.client.get_open_positions()
+    
     async def close_position(self, symbol: str) -> Dict[str, Any]:
         """Close an open position."""
         return await self.client.close_position(symbol)

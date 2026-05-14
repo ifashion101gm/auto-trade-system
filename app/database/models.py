@@ -2,8 +2,21 @@
 SQLAlchemy ORM models for the Auto Trade System.
 Aligned with migrations/versions/001_initial_schema.py
 """
+from enum import Enum
 from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Index, DateTime, func
 from app.database.connection import Base
+
+
+class TradeStatus(Enum):
+    """Trade lifecycle status states."""
+    SIGNALLED = "signalled"
+    PENDING = "pending"
+    OPEN = "open"
+    PARTIAL = "partial_fill"
+    CLOSED = "closed"
+    FAILED = "failed"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
 
 
 class ModelUsage(Base):
@@ -101,11 +114,13 @@ class PaperTrades(Base):
     status = Column(Text, nullable=False, server_default='open')
     notes = Column(Text, nullable=True)
     execution_mode = Column(Text, nullable=True)
+    trade_status = Column(Text, nullable=False, server_default='signalled')  # Trade lifecycle status
 
     __table_args__ = (
         Index('idx_paper_trades_user_status', 'user_id', 'status'),
         Index('idx_paper_trades_symbol', 'symbol'),
         Index('idx_paper_trades_ts_open', 'ts_open'),
+        Index('idx_paper_trades_trade_status', 'trade_status'),  # Index for status queries
     )
 
 

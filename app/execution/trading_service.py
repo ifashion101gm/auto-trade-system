@@ -354,6 +354,13 @@ class LiveTradingService:
             logger.info(f"   Take Profit: ${proposal['take_profit']:,.2f}")
             logger.info(f"   Leverage: {proposal['leverage']}x")
             
+            # Lifecycle log: Signal generated
+            logger.info(
+                f"[SIGNAL] {proposal['symbol']} {proposal['side']} @ "
+                f"${proposal['entry_price']:,.2f} | "
+                f"Confidence: {proposal.get('confidence', 0):.2%}"
+            )
+            
             # Duplicate signal check
             logger.info("\n🔒 Checking for duplicate signals...")
             signal_decision = await self.self_healing_engine.guard_signal(proposal)
@@ -409,6 +416,12 @@ class LiveTradingService:
                 'position_size_pct': risk_decision.position_size_pct,
                 'risk_score': risk_decision.risk_score
             }
+            
+            # Lifecycle log: Risk approved
+            logger.info(
+                f"[RISK] Approved | Score: {risk_decision.risk_score}/100 | "
+                f"Risk: {risk_decision.position_size_pct:.2%}"
+            )
             
             # Stage 5: Execute Order (based on execution mode)
             logger.info(f"\n⚡ Stage 5: Executing order (mode: {self.execution_mode})...")
@@ -871,6 +884,12 @@ class LiveTradingService:
                     leverage=leverage
                 )
                 
+                # Lifecycle log: Order sent
+                logger.info(
+                    f"[ORDER_SENT] {symbol} {side.upper()} {quantity} | "
+                    f"Order: {order_result.get('order_id')}"
+                )
+                
                 # Update proposal status
                 if db_session and proposal_id:
                     stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
@@ -907,6 +926,12 @@ class LiveTradingService:
                 if db_session:
                     db_session.add(trade_record)
                     await db_session.commit()
+                
+                # Lifecycle log: Position opened
+                logger.info(
+                    f"[POSITION_OPEN] Trade ID: {trade_record.id} | "
+                    f"Symbol: {trade_record.symbol} | Side: {trade_record.side}"
+                )
                 
                 return {
                     'status': 'executed',
