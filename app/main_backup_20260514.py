@@ -151,7 +151,7 @@ def uptime_seconds():
     """Get application uptime in seconds."""
     return int(time.time() - state.start_time)
 
-def require_admin(x_api_key: str | None = Header(default=None)):
+def require_admin(x_api_key: str = Header(None)):
     """
     Require admin API key for protected routes.
     
@@ -541,7 +541,7 @@ app.include_router(llm_router, prefix="/api/v1", tags=["llm-optimization"])
 # ============================================================================
 
 @app.post("/admin/trading/enable")
-async def enable_trading(x_api_key: str | None = Header(default=None)):
+async def enable_trading(x_api_key: str = Header(None)):
     """Enable trading (admin only)."""
     require_admin(x_api_key)
     
@@ -554,7 +554,7 @@ async def enable_trading(x_api_key: str | None = Header(default=None)):
     return {"ok": True, "trading_enabled": True}
 
 @app.post("/admin/trading/disable")
-async def disable_trading(x_api_key: str | None = Header(default=None)):
+async def disable_trading(x_api_key: str = Header(None)):
     """Disable trading (admin only)."""
     require_admin(x_api_key)
     
@@ -566,7 +566,7 @@ async def disable_trading(x_api_key: str | None = Header(default=None)):
     return {"ok": True, "trading_enabled": False}
 
 @app.post("/admin/circuit-breaker/reset")
-async def reset_circuit_breaker(x_api_key: str | None = Header(default=None)):
+async def reset_circuit_breaker(x_api_key: str = Header(None)):
     """Reset circuit breaker (admin only)."""
     require_admin(x_api_key)
     
@@ -578,7 +578,7 @@ async def reset_circuit_breaker(x_api_key: str | None = Header(default=None)):
     return {"ok": True, "circuit_breaker": cb.get_status()}
 
 @app.post("/admin/telegram/test")
-async def telegram_test(x_api_key: str | None = Header(default=None)):
+async def telegram_test(x_api_key: str = Header(None)):
     """Queue test Telegram message (admin only)."""
     require_admin(x_api_key)
     
@@ -587,7 +587,7 @@ async def telegram_test(x_api_key: str | None = Header(default=None)):
     return {"queued": True, "queue_size": state.telegram_queue.qsize()}
 
 @app.get("/admin/state")
-async def admin_state(x_api_key: str | None = Header(default=None)):
+async def admin_state(x_api_key: str = Header(None)):
     """Get full system state (admin only)."""
     require_admin(x_api_key)
     

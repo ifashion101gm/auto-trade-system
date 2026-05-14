@@ -51,36 +51,52 @@ class PositionSyncService:
         self.position_repo = PositionRepository()
         self.testnet = testnet
         self._running = False
-        self._sync_interval = 5  # seconds
         
-        logger.info("✅ PositionSyncService initialized with Bybit Demo Trading")
+        # OPTIMIZED: WebSocket-first approach with REST fallback
+        self._ws_update_received = False
+        self._last_ws_update_time = None
+        self._rest_sync_interval = 15  # Changed from 5 to 15 seconds
+        
+        logger.info("✅ PositionSyncService initialized with Bybit Demo Trading (WebSocket-first)")
         
         # Subscribe to WebSocket reconnection events for immediate sync
         event_bus.subscribe(WEBSOCKET_RECONNECTED, self._on_websocket_reconnected)
     
     async def start(self, db_session_factory):
         """
-        Start continuous position synchronization with graceful degradation.
+        Start continuous position synchronization with WebSocket-first optimization.
+        
+        Strategy:
+        - If WebSocket update received within last 10s, skip REST sync
+        - Otherwise, perform REST sync every 15 seconds as fallback
+        - Reduces API calls and latency while maintaining accuracy
         
         Args:
             db_session_factory: Async session factory for database access
         """
+        import time
         self._running = True
-        logger.info(f"🔄 Position sync started (interval={self._sync_interval}s, testnet={self.testnet})")
+        logger.info(f"🔄 Position sync started (WebSocket-first, REST fallback={self._rest_sync_interval}s)")
         
         consecutive_db_failures = 0
-        max_consecutive_failures = 5  # After this many failures, reduce sync frequency
+        max_consecutive_failures = 5
         
         while self._running:
             try:
-                # Use a single session for the sync cycle
+                # WebSocket-first logic: skip REST if recent WS update
+                current_time = time.time()
+                if self._ws_update_received and self._last_ws_update_time:
+                    time_since_ws = current_time - self._last_ws_update_time
+                    if time_since_ws < 10:  # Skip REST if WS update within 10s
+                        await asyncio.sleep(1)
+                        continue
+                
+                # Fallback to REST sync every 15 seconds
                 async with db_session_factory() as db_session:
                     await self.sync_once(db_session)
-                    # Reset failure counter on success
                     consecutive_db_failures = 0
                 
-                # Normal sync interval
-                await asyncio.sleep(self._sync_interval)
+                await asyncio.sleep(self._rest_sync_interval)
                 
             except Exception as e:
                 error_str = str(e).lower()
@@ -92,25 +108,35 @@ class PositionSyncService:
                         f"⚠️  Database connection issue during sync (failure {consecutive_db_failures}): {e}"
                     )
                     
-                    # Graceful degradation: reduce sync frequency when DB is unavailable
                     if consecutive_db_failures >= max_consecutive_failures:
-                        degraded_interval = self._sync_interval * 6  # Sync every 30s instead of 5s
+                        degraded_interval = self._rest_sync_interval * 2  # 30s instead of 15s
                         logger.warning(
-                            f"🔧 Entering degraded mode - reducing sync frequency to {degraded_interval}s "
-                            f"due to persistent database issues"
+                            f"🔧 Entering degraded mode - reducing sync frequency to {degraded_interval}s"
                         )
                         await asyncio.sleep(degraded_interval)
                     else:
-                        await asyncio.sleep(self._sync_interval)
+                        await asyncio.sleep(self._rest_sync_interval)
                 else:
-                    # Non-DB errors - log and continue normally
                     logger.error(f"❌ Position sync error: {e}")
-                    await asyncio.sleep(self._sync_interval)
+                    await asyncio.sleep(self._rest_sync_interval)
     
     def stop(self):
         """Stop position synchronization."""
         self._running = False
         logger.info("🛑 Position sync stopped")
+    
+    def on_websocket_update(self, position_data: Dict[str, Any]):
+        """
+        Called when WebSocket sends position update.
+        Marks that we have fresh data from WebSocket to skip unnecessary REST syncs.
+        
+        Args:
+            position_data: Position update from WebSocket stream
+        """
+        import time
+        self._ws_update_received = True
+        self._last_ws_update_time = time.time()
+        logger.debug(f"📡 WebSocket position update received at {self._last_ws_update_time}")
     
     async def _on_websocket_reconnected(self, event):
         """

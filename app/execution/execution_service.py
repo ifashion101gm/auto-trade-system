@@ -221,6 +221,18 @@ class ExecutionService:
         """Validate execution request parameters."""
         errors = []
         
+        # CRITICAL: Enforce XAUUSDT-only trading
+        from app.config import settings
+        normalized_symbol = request.symbol.upper().replace('/', '').replace(':', '')
+        allowed_symbols = [s.upper().replace('/', '').replace(':', '') for s in settings.ENABLED_TRADING_SYMBOLS]
+        
+        if normalized_symbol not in allowed_symbols:
+            return ExecutionResult(
+                success=False,
+                status='rejected',
+                error=f"Symbol '{request.symbol}' NOT ALLOWED. Trading is EXCLUSIVELY restricted to XAUUSDT (Gold). Allowed symbols: {settings.ENABLED_TRADING_SYMBOLS}"
+            )
+        
         # Check required fields
         if not request.symbol:
             errors.append("Symbol is required")

@@ -1,0 +1,29 @@
+[Unit]
+Description=Auto Trade System - Gold Bot Worker
+After=network.target postgresql.service redis.service
+Wants=postgresql.service redis.service
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/.openclaw/workspace/auto-trade-system
+Environment=PYTHONPATH=/home/admin/.openclaw/workspace/auto-trade-system
+ExecStart=/home/admin/.openclaw/workspace/auto-trade-system/.venv/bin/python -m app.worker_gold_bot
+Restart=always
+RestartSec=5
+# Use journal for logging (systemd default)
+StandardOutput=journal
+StandardError=journal
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/admin/.openclaw/workspace/auto-trade-system/data
+ReadWritePaths=/home/admin/.openclaw/workspace/auto-trade-system/logs
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+
+[Install]
+WantedBy=multi-user.target

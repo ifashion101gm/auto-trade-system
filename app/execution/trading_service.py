@@ -86,6 +86,11 @@ class LiveTradingService:
         logger.info(f"   AI: {'OpenRouter' if use_openrouter else 'Heuristic'}")
         logger.info(f"   State Machine: Enabled")
         
+        # CRITICAL: Enforce XAUUSDT-only trading
+        self.allowed_symbols = settings.ENABLED_TRADING_SYMBOLS
+        logger.info(f"   ⚠️  EXCLUSIVE SYMBOL ENFORCEMENT: {self.allowed_symbols}")
+        logger.info(f"   All other symbols will be REJECTED")
+        
         # Initialize self-healing agents
         from app.services.startup_recovery import StartupRecoveryService
         from app.services.position_monitor import PositionMonitor
@@ -224,23 +229,59 @@ class LiveTradingService:
             ]
         }
     
+    def _validate_symbol_allowed(self, symbol: str) -> bool:
+        """
+        Validate that the symbol is allowed for trading.
+        
+        CRITICAL: Trading is EXCLUSIVELY restricted to XAUUSDT (Gold).
+        All other symbols are REJECTED immediately.
+        
+        Args:
+            symbol: Trading pair symbol to validate
+            
+        Returns:
+            True if symbol is allowed, False otherwise
+            
+        Raises:
+            ValueError: If symbol is not in allowed list
+        """
+        # Normalize symbol for comparison
+        normalized = symbol.upper().replace('/', '').replace(':', '')
+        allowed_normalized = [s.upper().replace('/', '').replace(':', '') for s in self.allowed_symbols]
+        
+        if normalized not in allowed_normalized:
+            error_msg = (
+                f"🚫 SYMBOL REJECTED: '{symbol}' is NOT ALLOWED. "
+                f"Trading is EXCLUSIVELY restricted to {self.allowed_symbols} (Gold). "
+                f"Attempted symbol: {symbol}"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        
+        logger.debug(f"✅ Symbol validated: {symbol} (XAUUSDT Gold)")
+        return True
+    
     async def execute_trading_cycle(
         self,
-        symbol: str = "BTC/USDT",
+        symbol: str = None,  # Default to None - will be set to XAUUSDT
         user_id: str = "default_user",
         db_session: Optional[AsyncSession] = None,
         execute_on_binance: bool = True,
         execute_on_mexc: bool = False
     ) -> Dict[str, Any]:
         """
-        Execute complete trading cycle with real market data and order execution.
+        Execute complete trading cycle EXCLUSIVELY for XAUUSDT (Gold).
         
-        Args:
-            symbol: Trading pair to analyze
-            user_id: User identifier for tracking
-            db_session: Database session for persistence
-            
-        Returns:
+        CRITICAL: All trading is restricted to XAUUSDT. Other symbols are rejected.
+        
+        Flow:
+        1. Validate symbol (XAUUSDT only)
+        2. Fetch real market data from exchange
+        3. Run AI analysis (OpenRouter-powered)
+        4. Execute real orders on testnet/mainnet
+        5. Persist results to database
+        6. Send Telegram notifications
+        7. Analyze performance for self-learning
             Complete cycle results including order details and P&L
         """
         cycle_start = time.time()
@@ -253,6 +294,21 @@ class LiveTradingService:
         }
         
         try:
+            # CRITICAL: Enforce XAUUSDT-only trading
+            if symbol is None:
+                symbol = settings.PRIMARY_TRADING_SYMBOL  # Default to XAUUSDT
+                logger.info(f"🎯 Using default symbol: {symbol} (Gold)")
+            
+            # Validate symbol is allowed
+            if not self._validate_symbol_allowed(symbol):
+                error_msg = f"❌ Symbol '{symbol}' REJECTED. Trading is EXCLUSIVELY restricted to XAUUSDT"
+                logger.error(error_msg)
+                results['status'] = 'symbol_rejected'
+                results['error'] = error_msg
+                return results
+            
+            logger.info(f"✅ Symbol validated: {symbol} (XAUUSDT Gold)")
+            
             # Pre-cycle self-healing health gate. This checks the monitoring
             # agent and circuit breaker before any market/exchange action.
             await self._transition_to(ExecutionState.IDLE)
@@ -1282,7 +1338,7 @@ class LiveTradingService:
                 user_id=user_id,
                 db_session=db_session,
                 exchange="mexc",
-                symbol=settings.GOLD_SYMBOL_MEXC
+                symbol=settings.PRIMARY_TRADING_SYMBOL  # XAUUSDT only
             )
             
             # Send validation report to Telegram

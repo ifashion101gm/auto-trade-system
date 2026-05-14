@@ -17,8 +17,13 @@ NC='\033[0m' # No Color
 
 # Check if virtual environment exists
 if [ ! -d ".venv" ]; then
-    echo -e "${RED}❌ Virtual environment not found. Run: python3 -m venv .venv${NC}"
-    exit 1
+    echo -e "${RED}❌ Virtual environment not found.${NC}"
+    echo -e "${YELLOW}Creating with Python 3.11...${NC}"
+    /home/linuxbrew/.linuxbrew/bin/python3.11 -m venv .venv
+    source .venv/bin/activate
+    pip install --upgrade pip setuptools wheel
+    pip install -r requirements.txt
+    echo -e "${GREEN}✅ Virtual environment created with Python 3.11${NC}"
 fi
 
 # Activate virtual environment

@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: Optional[str] = None
     TELEGRAM_CHAT_ID: Optional[str] = None
     
+    # Admin API Key (for enterprise admin routes)
+    ADMIN_API_KEY: Optional[str] = None
+    
     # Binance Trading (Testnet/Mainnet)
     BINANCE_API_KEY: Optional[str] = None
     BINANCE_API_SECRET: Optional[str] = None
@@ -76,10 +79,15 @@ class Settings(BaseSettings):
     # In semi-auto mode, positions ≤ this value auto-execute
     AUTO_EXECUTE_THRESHOLD_USD: float = 100.0
     
-    # Gold Futures Trading Configuration
-    GOLD_SYMBOL_BINANCE: str = "PAXG/USDT"  # Paxos Gold on Binance Testnet (legacy)
-    GOLD_SYMBOL_MEXC: str = "GOLD(XAUT)/USDT"  # Tether Gold on MEXC Futures (primary)
-    GOLD_SYMBOL_BYBIT: str = "XAU/USDT:USDT"  # Gold perpetual swap on Bybit Demo
+    # Gold Futures Trading Configuration - EXCLUSIVE SYMBOL
+    GOLD_SYMBOL_BINANCE: str = "XAU/USDT"  # Gold on Binance (legacy)
+    GOLD_SYMBOL_MEXC: str = "XAU/USDT"  # Gold on MEXC Futures
+    GOLD_SYMBOL_BYBIT: str = "XAUUSDT"  # Gold perpetual swap on Bybit Demo/Live
+    
+    # Primary Trading Symbol - EXCLUSIVELY XAUUSDT
+    PRIMARY_TRADING_SYMBOL: str = "XAUUSDT"  # All trading restricted to this symbol
+    ENABLED_TRADING_SYMBOLS: list = ["XAUUSDT"]  # Only XAUUSDT allowed
+    
     GOLD_MAX_LEVERAGE: int = 5
     GOLD_RISK_PER_TRADE: float = 0.01
     GOLD_MIN_CONFIDENCE: float = 0.65

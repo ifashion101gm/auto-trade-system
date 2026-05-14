@@ -8,12 +8,14 @@ This module consolidates ALL risk checks into a single, authoritative source:
 - Consecutive loss tracking
 - Margin usage monitoring
 - API health verification
+- Symbol validation (XAUUSDT only)
 
 Benefits:
 - Single source of truth for risk rules
 - Easy to audit and modify
 - Consistent enforcement across all strategies
 - Centralized logging and alerting
+- EXCLUSIVE XAUUSDT trading enforcement
 """
 import logging
 from dataclasses import dataclass, field
@@ -24,6 +26,7 @@ from sqlalchemy import select, func
 
 from app.database.models import PaperTrades
 from app.logging_config import log_risk_check
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +116,40 @@ class RiskManager:
         logger.info(f"   Max daily loss: {max_daily_loss_pct}%")
         logger.info(f"   Max drawdown: {max_drawdown_pct}%")
         logger.info(f"   Max consecutive losses: {max_consecutive_losses}")
+        logger.info(f"   Allowed symbols: {settings.ENABLED_TRADING_SYMBOLS}")
+    
+    def _check_symbol_allowed(self, symbol: str) -> Dict[str, Any]:
+        """
+        Validate that trading is restricted to XAUUSDT only.
+        
+        CRITICAL: This check ensures NO other symbols can be traded.
+        All trading activity is exclusively for Gold (XAUUSDT) day trading.
+        
+        Args:
+            symbol: Trading pair symbol to validate
+            
+        Returns:
+            Dict with pass/fail status and message
+        """
+        # Normalize symbol for comparison (remove slashes, colons, etc.)
+        normalized_symbol = symbol.upper().replace('/', '').replace(':', '')
+        
+        # Check against allowed symbols list
+        allowed = normalized_symbol in [s.upper().replace('/', '').replace(':', '') for s in settings.ENABLED_TRADING_SYMBOLS]
+        
+        if not allowed:
+            return {
+                'passed': False,
+                'message': f"Symbol '{symbol}' NOT ALLOWED. Trading is EXCLUSIVELY restricted to XAUUSDT (Gold). Attempted symbol: {symbol}",
+                'attempted_symbol': symbol,
+                'allowed_symbols': settings.ENABLED_TRADING_SYMBOLS,
+            }
+        
+        return {
+            'passed': True,
+            'message': '',
+            'validated_symbol': 'XAUUSDT',
+        }
     
     async def validate_trade(
         self,
@@ -144,6 +181,20 @@ class RiskManager:
         checks = {}
         violations = []
         warnings = []
+        
+        # Check 0: Symbol Validation - EXCLUSIVELY XAUUSDT
+        symbol_check = self._check_symbol_allowed(symbol)
+        checks['symbol_allowed'] = symbol_check['passed']
+        if not symbol_check['passed']:
+            violations.append(symbol_check['message'])
+            # Return early if symbol not allowed
+            return RiskValidationResult(
+                passed=False,
+                checks=checks,
+                violations=violations,
+                warnings=[],
+                metadata={'position_value_usd': position_value_usd, 'symbol': symbol}
+            )
         
         # Check 1: Position Size Limit
         position_check = await self._check_position_size(position_value_usd, symbol)
