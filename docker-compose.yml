@@ -17,8 +17,9 @@ services:
     image: postgres:15-alpine
     container_name: trading-postgres
     environment:
+      # SECURITY: Force users to set strong password in .env file
       POSTGRES_USER: ${DB_USER:-trading}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?Database password required}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?ERROR: Set DB_PASSWORD to a strong password in .env before deploying}
       POSTGRES_DB: ${DB_NAME:-vmassit}
       # PostgreSQL configuration for better connection handling
       POSTGRES_MAX_CONNECTIONS: "100"
@@ -46,6 +47,14 @@ services:
       - "listen_addresses=*"
       - "-c"
       - "max_connections=100"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
 
   redis:
     image: redis:7-alpine
@@ -63,6 +72,14 @@ services:
     restart: unless-stopped
     networks:
       - trading-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
 
   prometheus:
     image: prom/prometheus:latest
@@ -78,9 +95,23 @@ services:
       - '--web.enable-lifecycle'
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - trading-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
   grafana:
     image: grafana/grafana:latest
@@ -88,7 +119,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      # SECURITY: Force users to set strong password in .env file
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?ERROR: Set GRAFANA_PASSWORD to a strong password in .env before deploying}
       GF_INSTALL_PLUGINS: ""
     volumes:
       - grafana-data:/var/lib/grafana
@@ -96,9 +128,23 @@ services:
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
     depends_on:
       - prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - trading-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
   loki:
     image: grafana/loki:latest
@@ -109,9 +155,23 @@ services:
       - ./monitoring/loki-config.yml:/etc/loki/local-config.yaml
       - loki-data:/loki
     command: -config.file=/etc/loki/local-config.yaml
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks:
       - trading-network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
 
   promtail:
     image: grafana/promtail:latest
@@ -126,6 +186,155 @@ services:
     restart: unless-stopped
     networks:
       - trading-network
+
+  # =============================================================================
+  # TRADING BOT SERVICE (API Control Plane)
+  # =============================================================================
+  # FastAPI application serving REST API, WebSocket, and dashboard
+  # Handles: Signal generation, trade proposals, monitoring, admin controls
+  # =============================================================================
+  trading-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot-api
+    environment:
+      # Database configuration
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-trading}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-vmassit}
+      - REDIS_URL=redis://redis:6379/0
+      
+      # Exchange configuration
+      - ACTIVE_EXCHANGE=${ACTIVE_EXCHANGE:-bybit}
+      - BYBIT_API_KEY=${BYBIT_API_KEY}
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET}
+      - BYBIT_TESTNET=${BYBIT_TESTNET:-true}
+      
+      # Execution configuration
+      - EXECUTION_MODE=${EXECUTION_MODE:-semi-auto}
+      - ENABLED_TRADING_SYMBOLS=${ENABLED_TRADING_SYMBOLS:-XAUUSDT}
+      
+      # Telegram notifications
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      
+      # Self-healing agent thresholds
+      - MAX_EXECUTION_RETRIES=${MAX_EXECUTION_RETRIES:-3}
+      - MAX_SLIPPAGE_PCT=${MAX_SLIPPAGE_PCT:-0.5}
+      - MAX_API_LATENCY_MS=${MAX_API_LATENCY_MS:-5000}
+      - MAX_DRAWDOWN_PCT=${MAX_DRAWDOWN_PCT:-5.0}
+      
+      # Reconciliation settings
+      - RECONCILIATION_INTERVAL_SECONDS=${RECONCILIATION_INTERVAL_SECONDS:-60}
+      - RECONCILIATION_AUTO_REPAIR=${RECONCILIATION_AUTO_REPAIR:-true}
+      
+      # Circuit breaker config
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD=${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
+      - CIRCUIT_BREAKER_RECOVERY_TIMEOUT=${CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-300}
+      
+      # Logging configuration
+      - LOG_FORMAT=${LOG_FORMAT:-text}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # Give app time to initialize
+    restart: unless-stopped
+    networks:
+      - trading-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # =============================================================================
+  # WORKER SERVICE (Background Tasks)
+  # =============================================================================
+  # Handles: Position monitoring, reconciliation, session scheduling,
+  #          news guard, background data sync, learning updates
+  # Runs independently from API for better isolation and scalability
+  # =============================================================================
+  trading-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trading-bot-worker
+    environment:
+      # Database configuration
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-trading}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-vmassit}
+      - REDIS_URL=redis://redis:6379/0
+      
+      # Exchange configuration
+      - ACTIVE_EXCHANGE=${ACTIVE_EXCHANGE:-bybit}
+      - BYBIT_API_KEY=${BYBIT_API_KEY}
+      - BYBIT_API_SECRET=${BYBIT_API_SECRET}
+      - BYBIT_TESTNET=${BYBIT_TESTNET:-true}
+      
+      # Worker-specific configuration
+      - WORKER_MODE=true
+      - ENABLED_TRADING_SYMBOLS=${ENABLED_TRADING_SYMBOLS:-XAUUSDT}
+      
+      # Self-healing agent thresholds
+      - MAX_EXECUTION_RETRIES=${MAX_EXECUTION_RETRIES:-3}
+      - MAX_SLIPPAGE_PCT=${MAX_SLIPPAGE_PCT:-0.5}
+      - MAX_API_LATENCY_MS=${MAX_API_LATENCY_MS:-5000}
+      - MAX_DRAWDOWN_PCT=${MAX_DRAWDOWN_PCT:-5.0}
+      
+      # Reconciliation settings
+      - RECONCILIATION_INTERVAL_SECONDS=${RECONCILIATION_INTERVAL_SECONDS:-60}
+      - RECONCILIATION_AUTO_REPAIR=${RECONCILIATION_AUTO_REPAIR:-true}
+      
+      # Circuit breaker config
+      - CIRCUIT_BREAKER_FAILURE_THRESHOLD=${CIRCUIT_BREAKER_FAILURE_THRESHOLD:-5}
+      - CIRCUIT_BREAKER_RECOVERY_TIMEOUT=${CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-300}
+      
+      # Logging configuration
+      - LOG_FORMAT=${LOG_FORMAT:-text}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      trading-bot:
+        condition: service_healthy  # Wait for API to be ready
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import sys; sys.exit(0)' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - trading-network
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1.5G
+        reservations:
+          cpus: '0.5'
+          memory: 384M
+    # Override CMD to run worker instead of API
+    command: ["python", "app/worker_gold_bot.py"]
 
 volumes:
   pgdata:

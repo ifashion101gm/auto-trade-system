@@ -72,6 +72,26 @@ class LiveTradingService:
         self.validator = TradeValidator()
         self.param_cache = LearningParameterCache()
         
+        # CRITICAL: Initialize ExecutionService for centralized order lifecycle management
+        # ALL orders MUST pass through this service to ensure:
+        # - Idempotency protection (prevent duplicate trades)
+        # - Retry handling with exponential backoff
+        # - Circuit breaker integration
+        # - Exchange verification
+        # - Reconciliation queueing
+        # - Audit trail logging
+        from app.execution.execution_service import ExecutionService
+        self.execution_service = ExecutionService(
+            exchange_name=self.exchange_name,
+            use_testnet=self.use_testnet
+        )
+        logger.info("✅ ExecutionService initialized (centralized order lifecycle management)")
+        
+        # Concurrency safety: Symbol-level locks to prevent race conditions
+        # Ensures only ONE trade per symbol can execute at a time
+        self.symbol_locks: Dict[str, asyncio.Lock] = {}
+        logger.info("✅ Symbol-level concurrency locks initialized")
+        
         # Initialize risk engine and circuit breaker
         self.risk_engine = RiskEngine(db_session=None)  # Will be set per request
         self.circuit_breaker = SystemCircuitBreaker(notifier=self.notifier)
@@ -95,7 +115,7 @@ class LiveTradingService:
         from app.services.startup_recovery import StartupRecoveryService
         from app.services.position_monitor import PositionMonitor
         from app.services.reconciliation_service import PositionReconciliationService
-        from app.execution.reconciliation_engine import PositionReconciliationEngine
+        from app.execution.reconciliation_engine import OrderReconciliationEngine
         from app.execution.agents.signal_agent import SignalAgent
         from app.execution.agents.execution_agent import ExecutionAgent
         from app.execution.agents.verification_agent import VerificationAgent
@@ -114,7 +134,7 @@ class LiveTradingService:
             exchange_manager=self.exchange_manager
         )
         
-        self.reconciliation_engine = PositionReconciliationEngine(
+        self.reconciliation_engine = OrderReconciliationEngine(
             testnet=self.use_testnet
         )
         
@@ -176,6 +196,23 @@ class LiveTradingService:
         self.anomaly_detector = self.self_healing_engine.anomaly_detector
         
         logger.info("✅ Self-healing execution engine initialized (health gates + dedup + anomaly recovery)")
+    
+    def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
+        """
+        Get or create a lock for a specific trading symbol.
+        
+        This prevents race conditions when multiple signals arrive
+        for the same symbol simultaneously.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'XAUUSDT')
+            
+        Returns:
+            Asyncio lock for the symbol
+        """
+        if symbol not in self.symbol_locks:
+            self.symbol_locks[symbol] = asyncio.Lock()
+        return self.symbol_locks[symbol]
     
     async def _transition_to(self, new_state: ExecutionState):
         """
@@ -924,158 +961,70 @@ class LiveTradingService:
         
         # Execute order if auto-execution is enabled
         if should_auto_execute:
-            proposal_id = None
-            trade_record = None
+            # CRITICAL: ALL orders MUST pass through ExecutionService
+            # This ensures idempotency, retry logic, verification, and reconciliation
             
-            try:
-                # STEP 1: Create trade proposal record (if not exists)
-                if db_session and not proposal_id:
-                    trade_proposal = TradeProposals(
-                        ts=datetime.utcnow().isoformat(),
-                        user_id=user_id,
-                        exchange=self.exchange_name,
+            # Get symbol lock to prevent race conditions
+            symbol_lock = self._get_symbol_lock(symbol)
+            
+            async with symbol_lock:
+                logger.info(f"🔒 Acquired lock for {symbol} - preventing concurrent execution")
+                
+                try:
+                    # Import ExecutionRequest from execution service
+                    from app.execution.execution_service import ExecutionRequest
+                    
+                    # Create execution request with all parameters
+                    exec_request = ExecutionRequest(
                         symbol=symbol,
-                        side=side.upper(),
+                        side=side,
                         entry_price=entry_price,
+                        quantity=quantity,
+                        leverage=leverage,
                         stop_loss=proposal.get('stop_loss'),
                         take_profit=proposal.get('take_profit'),
-                        quantity=quantity,
-                        confidence=proposal.get('confidence'),
                         strategy_name=proposal.get('strategy_name'),
-                        status='pending',
-                        ai_metadata=json.dumps({
-                            'regime': proposal.get('regime'),
-                            'risk_level': proposal.get('risk_level'),
-                            'position_value_usd': position_value_usd
-                        })
-                    )
-                    db_session.add(trade_proposal)
-                    await db_session.flush()
-                    proposal_id = trade_proposal.id
-                
-                # STEP 2: Validate position size against safety limits
-                max_position_usd = (
-                    settings.VALIDATION_MODE_MAX_POSITION_USD 
-                    if self.use_testnet 
-                    else settings.LIVE_TRADING_MAX_POSITION_USD
-                )
-                
-                if position_value_usd > max_position_usd:
-                    error_msg = f"Position value ${position_value_usd:.2f} exceeds safety limit ${max_position_usd:.2f}"
-                    logger.error(error_msg)
-                    
-                    # Update proposal status to rejected
-                    if db_session and proposal_id:
-                        stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
-                        result = await db_session.execute(stmt)
-                        prop_record = result.scalar_one_or_none()
-                        if prop_record:
-                            prop_record.status = 'rejected'
-                            await db_session.flush()
-                    
-                    # Send alert via Telegram
-                    await self.notifier.send_message(
-                        f"🚨 SAFETY ALERT: Trade blocked\n{error_msg}\nSymbol: {symbol}\nSide: {side}"
+                        confidence=proposal.get('confidence'),
+                        user_id=user_id,
+                        execution_mode=self.execution_mode
                     )
                     
-                    raise ValueError(error_msg)
-                
-                # STEP 3: Place market order on exchange
-                order_result = await self.exchange_manager.create_market_order(
-                    symbol=symbol,
-                    side=side,
-                    amount=quantity,
-                    leverage=leverage
-                )
-                
-                # Lifecycle log: Order sent
-                logger.info(
-                    f"[ORDER_SENT] {symbol} {side.upper()} {quantity} | "
-                    f"Order: {order_result.get('order_id')}"
-                )
-                
-                # STEP 4: Update proposal status to executed
-                if db_session and proposal_id:
-                    stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
-                    result = await db_session.execute(stmt)
-                    prop_record = result.scalar_one_or_none()
-                    if prop_record:
-                        prop_record.status = 'executed'
-                        await db_session.flush()
-                
-                # STEP 5: Create paper trade record AFTER successful order
-                filled_price = order_result.get('price') or entry_price
-                fee = order_result.get('fee', {})
-                fee_cost = fee.get('cost', 0)
-                
-                trade_record = PaperTrades(
-                    ts_open=datetime.utcnow().isoformat(),
-                    user_id=user_id,
-                    exchange=self.exchange_name,
-                    symbol=symbol,
-                    side=side.upper(),
-                    leverage=leverage,
-                    qty=quantity,
-                    entry_price=filled_price,
-                    exit_price=None,
-                    stop_loss=proposal.get('stop_loss'),
-                    take_profit=proposal.get('take_profit'),
-                    profit=None,
-                    profit_pct=None,
-                    status='open',
-                    trade_status='POSITION_OPEN',  # Proper lifecycle state
-                    notes=f"Order ID: {order_result['order_id']}, Fee: ${fee_cost:.4f}, Position: ${position_value_usd:.2f}",
-                    execution_mode='auto' if position_value_usd <= 100 else 'fully-auto'
-                )
-                
-                if db_session:
-                    db_session.add(trade_record)
-                    await db_session.flush()  # Flush to get ID, but don't commit yet
-                
-                # Lifecycle log: Position opened
-                logger.info(
-                    f"[POSITION_OPEN] Trade ID: {trade_record.id if db_session else 'N/A'} | "
-                    f"Symbol: {trade_record.symbol} | Side: {trade_record.side}"
-                )
-                
-                return {
-                    'status': 'executed',
-                    'order_id': order_result['order_id'],
-                    'filled_price': filled_price,
-                    'filled_quantity': order_result.get('filled', quantity),
-                    'fee': fee_cost,
-                    'fee_currency': fee.get('currency', 'USDT'),
-                    'proposal_id': proposal_id,
-                    'trade_id': trade_record.id if db_session else None,
-                    'position_value_usd': position_value_usd,
-                    'auto_executed': position_value_usd <= 100,
-                    **proposal
-                }
-                
-            except Exception as e:
-                # Mark proposal as failed if it exists
-                if db_session and proposal_id:
-                    try:
-                        stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
-                        result = await db_session.execute(stmt)
-                        prop_record = result.scalar_one_or_none()
-                        if prop_record:
-                            prop_record.status = 'failed'
-                            await db_session.flush()
-                    except Exception as update_error:
-                        logger.error(f"Failed to update proposal status: {update_error}")
-                
-                # If trade record was created but order failed, mark it as failed
-                if db_session and trade_record:
-                    try:
-                        trade_record.status = 'failed'
-                        trade_record.trade_status = 'FAILED'
-                        trade_record.notes += f"\nExecution failed: {str(e)}"
-                        await db_session.flush()
-                    except Exception as update_error:
-                        logger.error(f"Failed to update trade record: {update_error}")
-                
-                raise Exception(f"Order execution failed: {str(e)}")
+                    # Delegate to ExecutionService - handles complete order lifecycle
+                    logger.info(f"🚀 Delegating to ExecutionService for {symbol} {side}")
+                    result = await self.execution_service.execute_trade(exec_request, db_session)
+                    
+                    if result.success:
+                        logger.info(
+                            f"✅ ExecutionService succeeded: "
+                            f"order_id={result.order_id}, trade_id={result.trade_id}, "
+                            f"filled_price=${result.filled_price:.2f}"
+                        )
+                        
+                        # Return result in format expected by caller
+                        return {
+                            'status': 'executed',
+                            'order_id': result.order_id,
+                            'filled_price': result.filled_price,
+                            'filled_quantity': result.filled_quantity,
+                            'fee': result.fee,
+                            'proposal_id': result.metadata.get('proposal_id'),
+                            'trade_id': result.trade_id,
+                            'position_value_usd': position_value_usd,
+                            'auto_executed': self.execution_mode == 'fully-auto',
+                            **proposal
+                        }
+                    else:
+                        logger.error(f"❌ ExecutionService failed: {result.error}")
+                        raise Exception(f"ExecutionService failed: {result.error}")
+                        
+                except Exception as e:
+                    logger.error(
+                        f"Trade execution via ExecutionService failed: {e}",
+                        exc_info=True
+                    )
+                    raise
+                finally:
+                    logger.info(f"🔓 Released lock for {symbol}")
         
         else:
             raise ValueError(f"Invalid execution mode: {self.execution_mode}")

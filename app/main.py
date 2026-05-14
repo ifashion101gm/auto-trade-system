@@ -52,6 +52,9 @@ from app.risk.circuit_breaker import get_circuit_breaker
 from app.runtime.session_scheduler import SessionScheduler
 from app.runtime.news_guard import NewsGuard
 
+# Phase 2: Self-healing watchdogs
+from app.self_healing.watchdogs import WatchdogOrchestrator
+
 # ============================================================================
 # METRICS REGISTRY
 # ============================================================================
@@ -129,6 +132,9 @@ class AppState:
         self.session_scheduler: SessionScheduler = SessionScheduler()
         self.news_guard: NewsGuard = NewsGuard(default_buffer_minutes=30)
         self.task_supervisor: TaskSupervisor = None
+        
+        # Phase 2: Self-healing watchdogs
+        self.watchdog_orchestrator: WatchdogOrchestrator = None
         
         # Legacy services (for backward compatibility)
         self.sync_agent = None
@@ -373,6 +379,18 @@ async def init_services():
         restart_delay=10.0
     )
     
+    # Phase 2: Initialize self-healing watchdogs
+    logger.info("🔍 Initializing self-healing watchdogs...")
+    state.watchdog_orchestrator = WatchdogOrchestrator(
+        exchange_manager=None,  # Will be set when exchange is initialized
+        db_session_factory=get_session,
+        api_check_interval=getattr(settings, 'API_WATCHDOG_CHECK_INTERVAL_SEC', 30),
+        db_check_interval=getattr(settings, 'DB_WATCHDOG_CHECK_INTERVAL_SEC', 60),
+        memory_check_interval=getattr(settings, 'MEMORY_WATCHDOG_CHECK_INTERVAL_SEC', 120),
+        queue_check_interval=getattr(settings, 'QUEUE_WATCHDOG_CHECK_INTERVAL_SEC', 60)
+    )
+    logger.info("✅ Self-healing watchdogs initialized")
+    
     # Enterprise workers (safe_loop pattern)
     asyncio.create_task(safe_loop("session_scheduler", session_scheduler_worker))
     asyncio.create_task(safe_loop("telegram_queue", telegram_queue_worker))
@@ -419,6 +437,11 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     await init_services()
     
+    # Phase 2: Start self-healing watchdogs
+    if state.watchdog_orchestrator:
+        await state.watchdog_orchestrator.start_all_watchdogs()
+        logger.info("✅ Self-healing watchdogs started")
+    
     logger.info("🎉 Auto Trade System Enterprise fully operational!")
     logger.info(f"   Dashboard: http://localhost:8000/docs")
     logger.info(f"   Metrics: http://localhost:8000/metrics/prometheus")
@@ -426,6 +449,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"   Admin: http://localhost:8000/admin/state (requires API key)")
     
     yield
+    
+    # Phase 2: Stop self-healing watchdogs
+    if state.watchdog_orchestrator:
+        await state.watchdog_orchestrator.stop_all_watchdogs()
+        logger.info("✅ Self-healing watchdogs stopped")
     
     await close_services()
 

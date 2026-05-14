@@ -163,6 +163,31 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     
     # =========================================================================
+    # Phase 2: Self-Healing Watchdog Configuration
+    # =========================================================================
+    
+    # API Watchdog
+    API_WATCHDOG_MAX_LATENCY_MS: float = 5000
+    API_WATCHDOG_CHECK_INTERVAL_SEC: int = 30
+    API_WATCHDOG_FAILURE_THRESHOLD: int = 3
+    
+    # Database Watchdog
+    DB_WATCHDOG_MAX_POOL_UTILIZATION_PCT: float = 80.0
+    DB_WATCHDOG_STALE_TRANSACTION_THRESHOLD_SEC: int = 300
+    DB_WATCHDOG_CHECK_INTERVAL_SEC: int = 60
+    
+    # Memory Watchdog
+    MEMORY_WATCHDOG_WARNING_THRESHOLD_MB: float = 512
+    MEMORY_WATCHDOG_CRITICAL_THRESHOLD_MB: float = 1024
+    MEMORY_WATCHDOG_GC_TRIGGER_THRESHOLD_MB: float = 768
+    MEMORY_WATCHDOG_CHECK_INTERVAL_SEC: int = 120
+    
+    # Queue Watchdog
+    QUEUE_WATCHDOG_MAX_TASK_AGE_SEC: int = 300
+    QUEUE_WATCHDOG_MAX_QUEUE_DEPTH: int = 100
+    QUEUE_WATCHDOG_CHECK_INTERVAL_SEC: int = 60
+    
+    # =========================================================================
     # Execution Layer Architecture (New)
     # =========================================================================
     

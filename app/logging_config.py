@@ -74,6 +74,7 @@ logger.configure(patcher=lambda record: {
     record["extra"].setdefault("symbol", "-"),
     record["extra"].setdefault("trade_id", "-"),
     record["extra"].setdefault("order_id", "-"),
+    record["extra"].setdefault("correlation_id", "-"),  # NEW: Correlation ID for distributed tracing
 })
 
 # ============================================================================
@@ -108,6 +109,7 @@ def json_serializer(record):
         "symbol": record["extra"].get("symbol", ""),
         "trade_id": record["extra"].get("trade_id", ""),
         "order_id": record["extra"].get("order_id", ""),
+        "correlation_id": record["extra"].get("correlation_id", ""),  # NEW: Distributed tracing
     }
     
     # Add exception info if present
@@ -294,6 +296,7 @@ def trade_context(
     symbol: Optional[str] = None,
     order_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,  # NEW: For distributed tracing
 ):
     """
     Context manager to inject trading context into log records.
@@ -307,10 +310,15 @@ def trade_context(
         symbol: Trading pair symbol
         order_id: Order identifier
         session_id: Session identifier (auto-generated if not provided)
+        correlation_id: Correlation ID for distributed tracing (auto-generated if not provided)
     """
     # Generate session ID if not provided
     if not session_id:
         session_id = str(uuid.uuid4())[:8]
+    
+    # Generate correlation ID if not provided
+    if not correlation_id:
+        correlation_id = str(uuid.uuid4())
     
     # Patch logger with context
     ctx_logger = logger.bind(
@@ -318,6 +326,7 @@ def trade_context(
         symbol=symbol or "",
         order_id=order_id or "",
         session_id=session_id,
+        correlation_id=correlation_id,  # NEW: Distributed tracing support
     )
     
     try:
@@ -333,6 +342,7 @@ def order_context(
     symbol: str,
     trade_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,  # NEW: For distributed tracing
 ):
     """
     Context manager for order-specific logging.
@@ -346,15 +356,21 @@ def order_context(
         symbol: Trading pair symbol (required)
         trade_id: Associated trade ID
         session_id: Session identifier
+        correlation_id: Correlation ID for distributed tracing (auto-generated if not provided)
     """
     if not session_id:
         session_id = str(uuid.uuid4())[:8]
+    
+    # Generate correlation ID if not provided
+    if not correlation_id:
+        correlation_id = str(uuid.uuid4())
     
     ctx_logger = logger.bind(
         trade_id=trade_id or "",
         symbol=symbol,
         order_id=order_id,
         session_id=session_id,
+        correlation_id=correlation_id,  # NEW: Distributed tracing support
     )
     
     try:

@@ -247,21 +247,48 @@ class HybridExchangeManager:
             'status': 'partial'
         }
         
-        # Determine overall status
+        # Determine overall status and handle partial failures with rollback
         if (results['binance'] and results['binance']['status'] == 'success' and 
             results['mexc'] and results['mexc']['status'] == 'success'):
             results['status'] = 'success'
             logger.info("✅ Dual trade executed successfully on both exchanges")
+            
         elif (results['binance'] and results['binance']['status'] == 'failed' and 
               results['mexc'] and results['mexc']['status'] == 'failed'):
             results['status'] = 'failed'
             logger.error("❌ Dual trade failed on both exchanges")
+            
         else:
-            # Partial success - log which one succeeded
-            if results['mexc'] and results['mexc']['status'] == 'success':
-                logger.warning("⚠️  MEXC succeeded but Binance failed (partial execution)")
-            elif results['binance'] and results['binance']['status'] == 'success':
-                logger.warning("⚠️  Binance succeeded but MEXC failed (partial execution)")
+            # Partial success - implement rollback for failed exchange
+            if results['mexc'] and results['mexc']['status'] == 'success' and results['binance']['status'] == 'failed':
+                logger.warning("⚠️  MEXC succeeded but Binance failed - initiating rollback")
+                
+                # Rollback MEXC position since dual execution failed
+                try:
+                    await self._rollback_mexc_position(results['mexc']['order'])
+                    results['mexc']['status'] = 'rolled_back'
+                    results['mexc']['rollback_reason'] = f"Binance failed: {results['binance'].get('error', 'unknown')}"
+                    results['status'] = 'rolled_back'
+                    logger.info("✅ MEXC position rolled back successfully")
+                except Exception as rollback_error:
+                    logger.critical(f"🚨 ROLLBACK FAILED: Could not close MEXC position: {rollback_error}")
+                    results['mexc']['rollback_failed'] = True
+                    results['status'] = 'partial_with_rollback_failure'
+                    
+            elif results['binance'] and results['binance']['status'] == 'success' and results['mexc']['status'] == 'failed':
+                logger.warning("⚠️  Binance succeeded but MEXC failed - initiating rollback")
+                
+                # Rollback Binance position since dual execution failed
+                try:
+                    await self._rollback_binance_position(results['binance']['order'])
+                    results['binance']['status'] = 'rolled_back'
+                    results['binance']['rollback_reason'] = f"MEXC failed: {results['mexc'].get('error', 'unknown')}"
+                    results['status'] = 'rolled_back'
+                    logger.info("✅ Binance position rolled back successfully")
+                except Exception as rollback_error:
+                    logger.critical(f"🚨 ROLLBACK FAILED: Could not close Binance position: {rollback_error}")
+                    results['binance']['rollback_failed'] = True
+                    results['status'] = 'partial_with_rollback_failure'
         
         return results
     
@@ -320,6 +347,76 @@ class HybridExchangeManager:
         
         else:
             raise ValueError(f"Unsupported exchange: {exchange}")
+    
+    async def _rollback_mexc_position(self, order: Dict[str, Any]):
+        """
+        Rollback (close) a MEXC position when dual execution fails.
+        
+        Args:
+            order: The original order details to close
+        """
+        if not self.mexc_client:
+            raise Exception("MEXC client not available for rollback")
+        
+        symbol = order.get('symbol', settings.GOLD_SYMBOL_MEXC)
+        side = order.get('side', 'buy')
+        quantity = order.get('quantity', order.get('amount', 0))
+        
+        # Close position with opposite side
+        opposite_side = 'sell' if side == 'buy' else 'buy'
+        
+        logger.warning(
+            f"🔄 Rolling back MEXC position: {opposite_side} {quantity} {symbol} "
+            f"(original: {side} at {order.get('price', 'N/A')})"
+        )
+        
+        try:
+            close_order = await self.mexc_client.create_market_order(
+                symbol=symbol,
+                side=opposite_side,
+                amount=quantity,
+                leverage=order.get('leverage', 1)
+            )
+            logger.info(f"✅ MEXC rollback successful: {close_order}")
+            return close_order
+        except Exception as e:
+            logger.error(f"❌ MEXC rollback failed: {e}")
+            raise
+    
+    async def _rollback_binance_position(self, order: Dict[str, Any]):
+        """
+        Rollback (close) a Binance position when dual execution fails.
+        
+        Args:
+            order: The original order details to close
+        """
+        if not self.binance_client:
+            raise Exception("Binance client not available for rollback")
+        
+        symbol = order.get('symbol', settings.GOLD_SYMBOL_BINANCE)
+        side = order.get('side', 'buy')
+        quantity = order.get('quantity', order.get('amount', 0))
+        
+        # Close position with opposite side
+        opposite_side = 'sell' if side == 'buy' else 'buy'
+        
+        logger.warning(
+            f"🔄 Rolling back Binance position: {opposite_side} {quantity} {symbol} "
+            f"(original: {side} at {order.get('price', 'N/A')})"
+        )
+        
+        try:
+            close_order = await self.binance_client.create_market_order(
+                symbol=symbol,
+                side=opposite_side,
+                amount=quantity,
+                leverage=order.get('leverage', 1)
+            )
+            logger.info(f"✅ Binance rollback successful: {close_order}")
+            return close_order
+        except Exception as e:
+            logger.error(f"❌ Binance rollback failed: {e}")
+            raise
     
     async def fetch_positions(self) -> Dict[str, List[Dict[str, Any]]]:
         """

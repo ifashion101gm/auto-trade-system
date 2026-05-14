@@ -133,6 +133,13 @@ class OrderReconciliationEngine:
                     self.total_runs += 1
                     self.total_mismatches += result.mismatches_found
                     
+                    # Publish metrics to Prometheus
+                    await self._publish_metrics(result)
+                    
+                    # Send Telegram alerts for critical mismatches
+                    if result.mismatches_found > 0:
+                        await self._send_telegram_alerts(result)
+                    
             except Exception as e:
                 logger.error(f"Reconciliation run failed: {e}", exc_info=True)
             
@@ -470,4 +477,105 @@ class OrderReconciliationEngine:
             'total_runs': self.total_runs,
             'total_mismatches': self.total_mismatches,
             'reconciliation_interval': self.reconciliation_interval
+        }
+    
+    async def _publish_metrics(self, result: ReconciliationResult):
+        """
+        Publish reconciliation results to Prometheus metrics.
+        
+        Args:
+            result: ReconciliationResult from latest run
+        """
+        try:
+            from app.monitoring.prometheus_metrics import get_metrics_collector
+            metrics = get_metrics_collector()
+            
+            # Update mismatch gauges by type
+            metrics.update_reconciliation_mismatches(
+                mismatch_type='orphaned',
+                count=len(result.orphaned_orders)
+            )
+            metrics.update_reconciliation_mismatches(
+                mismatch_type='ghost',
+                count=len(result.ghost_positions)
+            )
+            metrics.update_reconciliation_mismatches(
+                mismatch_type='status_diff',
+                count=len(result.status_mismatches)
+            )
+            
+            # Record repairs as counters
+            for _ in range(result.mismatches_repaired):
+                metrics.record_reconciliation_repair(repair_type='auto_repair')
+            
+            logger.debug(f"📊 Published reconciliation metrics: {result.mismatches_found} mismatches")
+            
+        except Exception as e:
+            logger.error(f"Failed to publish reconciliation metrics: {e}")
+    
+    async def _send_telegram_alerts(self, result: ReconciliationResult):
+        """
+        Send Telegram alerts for critical reconciliation mismatches.
+        
+        Args:
+            result: ReconciliationResult with detected issues
+        """
+        try:
+            # Alert for orphaned orders (safe - auto-repaired)
+            if result.orphaned_orders:
+                for order in result.orphaned_orders:
+                    await self.notifier.send_reconciliation_alert(
+                        action='ORPHANED_ORDER_DETECTED',
+                        symbol=order.get('symbol', 'UNKNOWN'),
+                        exchange=self.exchange_name,
+                        mismatch_type='orphaned_order',
+                        requires_review=False  # Auto-repaired
+                    )
+            
+            # Alert for ghost positions (requires review)
+            if result.ghost_positions:
+                for pos in result.ghost_positions:
+                    await self.notifier.send_reconciliation_alert(
+                        action='GHOST_POSITION_DETECTED',
+                        symbol=pos.get('symbol', 'UNKNOWN'),
+                        exchange=self.exchange_name,
+                        mismatch_type='ghost_position',
+                        requires_review=True
+                    )
+            
+            # Alert for status mismatches (requires review)
+            if result.status_mismatches:
+                for mismatch in result.status_mismatches:
+                    await self.notifier.send_reconciliation_alert(
+                        action='STATUS_MISMATCH_DETECTED',
+                        symbol=mismatch.get('symbol', 'UNKNOWN'),
+                        exchange=self.exchange_name,
+                        mismatch_type='status_mismatch',
+                        requires_review=True
+                    )
+            
+            logger.info(f"📱 Sent {result.mismatches_alerted} Telegram alerts")
+            
+        except Exception as e:
+            logger.error(f"Failed to send Telegram alerts: {e}")
+    
+    def get_detailed_status(self) -> Dict[str, Any]:
+        """
+        Get detailed reconciliation status for dashboard.
+        
+        Returns:
+            Dictionary with comprehensive reconciliation information
+        """
+        return {
+            'is_running': self.is_running,
+            'last_run': self.last_run.isoformat() if self.last_run else None,
+            'total_runs': self.total_runs,
+            'total_mismatches_detected': self.total_mismatches,
+            'reconciliation_interval_seconds': self.reconciliation_interval,
+            'auto_repair_enabled': self.auto_repair_safe,
+            'exchange': self.exchange_name,
+            'testnet': self.use_testnet,
+            'next_run_in_seconds': max(0, self.reconciliation_interval - (
+                (datetime.utcnow() - self.last_run).total_seconds() if self.last_run else 0
+            ))
         }

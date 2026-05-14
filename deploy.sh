@@ -53,6 +53,14 @@ run_manual() {
 install_systemd() {
     check_root
     
+    echo -e "${YELLOW}Validating environment before installation...${NC}"
+    cd "$WORKSPACE"
+    if ! bash scripts/validate_env.sh; then
+        echo -e "${RED}❌ Environment validation failed. Aborting installation.${NC}"
+        exit 1
+    fi
+    echo ""
+    
     echo -e "${YELLOW}Installing systemd services...${NC}"
     
     # Copy service files
@@ -84,6 +92,14 @@ install_systemd() {
 # Option 3: Start systemd services
 start_systemd() {
     check_root
+    
+    echo -e "${YELLOW}Validating environment before starting...${NC}"
+    cd "$WORKSPACE"
+    if ! bash scripts/validate_env.sh; then
+        echo -e "${RED}❌ Environment validation failed. Aborting startup.${NC}"
+        exit 1
+    fi
+    echo ""
     
     echo -e "${YELLOW}Starting systemd services...${NC}"
     
