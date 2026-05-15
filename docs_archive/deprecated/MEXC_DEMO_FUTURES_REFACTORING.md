@@ -76,7 +76,7 @@ GOLD_MIN_CONFIDENCE = 0.65  # 65%
 **Status: ✅ No Changes Required**
 
 The existing agent pipeline remains intact:
-1. **TradingView Signals** → Webhook ingestion (unchanged)
+1. **External Signal Sources** → Webhook ingestion (unchanged)
 2. **Execution Agent** → Routes to MEXC via `HybridExchangeManager`
 3. **Risk Agent** → Validates against `GOLD_MAX_LEVERAGE` and `GOLD_MIN_CONFIDENCE`
 4. **Analytics Agent** → Compares MEXC vs Binance performance via paired trades

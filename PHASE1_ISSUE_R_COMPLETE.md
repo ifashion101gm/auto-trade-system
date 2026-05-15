@@ -228,8 +228,8 @@ with patch('app.execution.execution_service.UnifiedExchangeManager') as mock_man
 
 ---
 
-### Scenario 5: Duplicate Webhook from TradingView
-**Problem:** TradingView sends same webhook twice due to network retry.
+### Scenario 5: Duplicate Webhook from External Signal Source
+**Problem:** External signal source sends same webhook twice due to network retry.
 
 **Test:** `test_duplicate_order_id_handling`
 - First execution creates order

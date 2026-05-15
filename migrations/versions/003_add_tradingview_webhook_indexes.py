@@ -1,10 +1,10 @@
-"""add_tradingview_webhook_indexes
+"""add_signal_tracking_indexes
 
 Revision ID: 003
 Revises: ef11f40ce208
 Create Date: 2026-05-13
 
-Add indexes for TradingView webhook signal tracking
+Add indexes for webhook signal tracking
 """
 from typing import Sequence, Union
 
@@ -20,9 +20,9 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Upgrade schema to add TradingView webhook indexes."""
+    """Upgrade schema to add signal tracking indexes."""
     
-    # Add index on source for filtering TradingView signals
+    # Add index on source for filtering external signals
     op.create_index('idx_signals_source', 'signals', ['source'])
     
     # Add index on processed status for finding unprocessed signals

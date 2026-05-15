@@ -120,9 +120,9 @@ def mock_telegram_notifier():
 @pytest.fixture
 def sample_webhook_payload():
     """
-    Standard TradingView webhook payload for integration tests.
+    Standard webhook payload for integration tests.
     
-    Mimics the structure sent by TradingView alerts.
+    Mimics the structure sent by external signal sources.
     """
     return {
         'strategy': 'breakout',

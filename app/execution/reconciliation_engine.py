@@ -21,6 +21,7 @@ from app.infra.exchange_manager import UnifiedExchangeManager
 from app.database.models import PaperTrades, TradeProposals
 from app.notifications.notifier import TelegramNotifier
 from app.logging_config import get_logger
+from app.config import settings
 
 logger = get_logger(__name__)
 
@@ -67,10 +68,10 @@ class OrderReconciliationEngine:
         self,
         exchange_name: str = "binance",
         use_testnet: bool = True,
-        reconciliation_interval: int = 60,
-        auto_repair_safe: bool = True,
-        enable_telegram_alerts: bool = True,
-        enable_prometheus_metrics: bool = True
+        reconciliation_interval: Optional[int] = None,  # Use config if None
+        auto_repair_safe: Optional[bool] = None,  # Use config if None
+        enable_telegram_alerts: Optional[bool] = None,  # Use config if None
+        enable_prometheus_metrics: Optional[bool] = None  # Use config if None
     ):
         """
         Initialize reconciliation engine.
@@ -78,17 +79,23 @@ class OrderReconciliationEngine:
         Args:
             exchange_name: Exchange to reconcile against
             use_testnet: Use testnet mode
-            reconciliation_interval: Seconds between reconciliation runs
-            auto_repair_safe: Auto-repair safe mismatches (orphaned orders)
-            enable_telegram_alerts: Send Telegram alerts for critical mismatches
-            enable_prometheus_metrics: Publish metrics to Prometheus
+            reconciliation_interval: Seconds between reconciliation runs (default from config)
+            auto_repair_safe: Auto-repair safe mismatches (default from config)
+            enable_telegram_alerts: Send Telegram alerts for critical mismatches (default from config)
+            enable_prometheus_metrics: Publish metrics to Prometheus (default from config)
         """
         self.exchange_name = exchange_name
         self.use_testnet = use_testnet
-        self.reconciliation_interval = reconciliation_interval
-        self.auto_repair_safe = auto_repair_safe
-        self.enable_telegram_alerts = enable_telegram_alerts
-        self.enable_prometheus_metrics = enable_prometheus_metrics
+        
+        # Use configuration values if not explicitly provided (Issue B enhancement)
+        self.reconciliation_interval = reconciliation_interval or settings.RECONCILIATION_INTERVAL_SECONDS
+        self.auto_repair_safe = auto_repair_safe if auto_repair_safe is not None else settings.RECONCILIATION_AUTO_REPAIR_SAFE
+        self.enable_telegram_alerts = enable_telegram_alerts if enable_telegram_alerts is not None else settings.RECONCILIATION_TELEGRAM_ALERTS
+        self.enable_prometheus_metrics = enable_prometheus_metrics if enable_prometheus_metrics is not None else settings.RECONCILIATION_PROMETHEUS_METRICS
+        
+        # Additional Issue B configuration
+        self.max_orphaned_age_hours = settings.RECONCILIATION_MAX_ORPHANED_AGE_HOURS
+        self.ghost_position_action = settings.RECONCILIATION_GHOST_POSITION_ACTION
         
         # Initialize components
         self.exchange_manager = UnifiedExchangeManager(
@@ -104,6 +111,11 @@ class OrderReconciliationEngine:
         self.total_mismatches = 0
         
         logger.info(f"✅ Reconciliation Engine initialized ({exchange_name.upper()})")
+        logger.info(f"   Interval: {self.reconciliation_interval}s")
+        logger.info(f"   Auto-repair: {'ENABLED' if self.auto_repair_safe else 'DISABLED'}")
+        logger.info(f"   Telegram alerts: {'ENABLED' if self.enable_telegram_alerts else 'DISABLED'}")
+        logger.info(f"   Prometheus metrics: {'ENABLED' if self.enable_prometheus_metrics else 'DISABLED'}")
+        logger.info(f"   Ghost position action: {self.ghost_position_action}")
     
     async def start(self, db_session_factory):
         """
@@ -252,7 +264,11 @@ class OrderReconciliationEngine:
         result: ReconciliationResult,
         db_session: AsyncSession
     ):
-        """Detect orders in DB but not on exchange (orphaned)."""
+        """Detect orders in DB but not on exchange (orphaned).
+        
+        Issue B Enhancement: Only flag orphaned orders older than configured threshold
+        to avoid false positives during normal order processing.
+        """
         # Extract order IDs from exchange positions
         exchange_order_ids = set()
         for pos in exchange_positions:
@@ -265,6 +281,16 @@ class OrderReconciliationEngine:
             order_id = self._extract_order_id_from_notes(db_pos['notes'])
             
             if order_id and order_id not in exchange_order_ids:
+                # Check age of orphaned order (Issue B enhancement)
+                is_old_enough = self._is_position_old_enough(db_pos)
+                
+                if not is_old_enough:
+                    logger.debug(
+                        f"Skipping recent orphaned order check for Trade {db_pos['trade_id']} "
+                        f"(age < {self.max_orphaned_age_hours}h)"
+                    )
+                    continue
+                
                 # Found orphaned order
                 result.orphaned_orders.append(db_pos)
                 result.mismatches_found += 1
@@ -288,7 +314,11 @@ class OrderReconciliationEngine:
         result: ReconciliationResult,
         db_session: AsyncSession
     ):
-        """Detect positions on exchange but not in DB (ghost)."""
+        """Detect positions on exchange but not in DB (ghost).
+        
+        Issue B Enhancement: Respect configured ghost position action
+        (import_and_alert, alert_only, or ignore).
+        """
         # Extract symbols from DB positions
         db_symbols = set()
         for pos in db_positions:
@@ -306,8 +336,16 @@ class OrderReconciliationEngine:
                     f"exists on exchange but not in DB"
                 )
                 
-                # Import into database
-                await self._import_ghost_position(exc_pos, db_session, result)
+                # Handle based on configured action (Issue B enhancement)
+                if self.ghost_position_action == "import_and_alert":
+                    await self._import_ghost_position(exc_pos, db_session, result)
+                elif self.ghost_position_action == "alert_only":
+                    await self._alert_mismatch('GHOST_POSITION_DETECTED', exc_pos, result)
+                elif self.ghost_position_action == "ignore":
+                    logger.info(f"Ghost position ignored per configuration: {exc_pos['symbol']}")
+                else:
+                    logger.warning(f"Unknown ghost position action: {self.ghost_position_action}")
+                    await self._import_ghost_position(exc_pos, db_session, result)
     
     async def _detect_status_mismatches(
         self,
@@ -359,6 +397,40 @@ class OrderReconciliationEngine:
                 return order_id
         
         return None
+    
+    def _is_position_old_enough(self, db_pos: Dict) -> bool:
+        """
+        Check if position is old enough to be considered orphaned.
+        
+        Issue B Enhancement: Prevents false positives by only flagging
+        positions older than configured threshold.
+        
+        Args:
+            db_pos: Database position dictionary
+            
+        Returns:
+            True if position is older than max_orphaned_age_hours
+        """
+        try:
+            ts_open = db_pos.get('ts_open')
+            if not ts_open:
+                # If no timestamp, assume it's old enough to check
+                return True
+            
+            # Parse timestamp
+            if isinstance(ts_open, str):
+                open_time = datetime.fromisoformat(ts_open.replace('Z', '+00:00'))
+            else:
+                open_time = ts_open
+            
+            # Calculate age in hours
+            age_hours = (datetime.utcnow() - open_time.replace(tzinfo=None)).total_seconds() / 3600
+            
+            return age_hours >= self.max_orphaned_age_hours
+            
+        except Exception as e:
+            logger.warning(f"Failed to calculate position age: {e}. Assuming old enough.")
+            return True  # Conservative: check if we can't determine age
     
     async def _repair_orphaned_order(
         self,
@@ -644,6 +716,8 @@ class OrderReconciliationEngine:
         """
         Get detailed reconciliation status for dashboard.
         
+        Issue B Enhancement: Includes configuration details and next run time.
+        
         Returns:
             Dictionary with comprehensive reconciliation information
         """
@@ -654,6 +728,10 @@ class OrderReconciliationEngine:
             'total_mismatches_detected': self.total_mismatches,
             'reconciliation_interval_seconds': self.reconciliation_interval,
             'auto_repair_enabled': self.auto_repair_safe,
+            'telegram_alerts_enabled': self.enable_telegram_alerts,
+            'prometheus_metrics_enabled': self.enable_prometheus_metrics,
+            'max_orphaned_age_hours': self.max_orphaned_age_hours,
+            'ghost_position_action': self.ghost_position_action,
             'exchange': self.exchange_name,
             'testnet': self.use_testnet,
             'next_run_in_seconds': max(0, self.reconciliation_interval - (

@@ -221,7 +221,12 @@ class Settings(BaseSettings):
     POSITION_CHECK_INTERVAL: float = 5.0  # seconds
     
     # Reconciliation Configuration
-    RECONCILIATION_INTERVAL_SECONDS: int = 120  # Run every 2 minutes
+    RECONCILIATION_INTERVAL_SECONDS: int = 120  # Run every 2 minutes (Issue B)
+    RECONCILIATION_AUTO_REPAIR_SAFE: bool = True  # Auto-repair safe mismatches
+    RECONCILIATION_TELEGRAM_ALERTS: bool = True  # Enable Telegram alerts for critical mismatches
+    RECONCILIATION_PROMETHEUS_METRICS: bool = True  # Publish metrics to Prometheus
+    RECONCILIATION_MAX_ORPHANED_AGE_HOURS: int = 24  # Max age before flagging orphaned orders
+    RECONCILIATION_GHOST_POSITION_ACTION: str = "import_and_alert"  # Options: import_and_alert, alert_only, ignore
     
     # =========================================================================
     # Risk Management Engine Configuration

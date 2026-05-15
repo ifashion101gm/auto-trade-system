@@ -942,7 +942,7 @@ class AIAgentOrchestrator:
         else:
             checks.append(('Volatility', False, f'{volatility:.2f} too high'))
         
-        passed = score >= 80  # Require 80% to pass
+        passed = score >= 65  # Require 65% to pass (Safer Growth threshold)
         
         return {
             'pass': passed,

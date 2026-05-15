@@ -146,11 +146,13 @@ class LiveTradingService:
         )
         
         self.reconciliation_service = PositionReconciliationService(
-            exchange_manager=self.exchange_manager
+            exchange_manager=self.exchange_manager,
+            event_bus=event_bus
         )
         
         self.reconciliation_engine = OrderReconciliationEngine(
-            testnet=self.use_testnet
+            exchange_name=self.exchange_name,
+            use_testnet=self.use_testnet
         )
         
         self.startup_recovery = StartupRecoveryService(

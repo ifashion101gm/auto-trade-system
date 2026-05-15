@@ -1,11 +1,15 @@
 """
 Smart Retry System with exponential backoff and idempotency.
 Prevents duplicate orders and handles transient failures gracefully.
+
+Enhanced with Redis-backed persistent idempotency for crash recovery
+(Freqtrade pattern integration).
 """
 import asyncio
 import time
 import uuid
 import random
+import json
 from typing import Callable, Optional, Dict, Any
 import logging
 
@@ -30,11 +34,76 @@ class RetryConfig:
         self.jitter = jitter
 
 
+class PersistentIdempotencyManager:
+    """
+    Redis-backed idempotency manager for crash recovery.
+    
+    Ensures order submissions remain idempotent even after system restarts.
+    Falls back to in-memory storage if Redis is unavailable.
+    """
+    
+    def __init__(self, redis_client=None, ttl_seconds: int = 3600):
+        """
+        Initialize persistent idempotency manager.
+        
+        Args:
+            redis_client: Redis client instance (optional)
+            ttl_seconds: Time-to-live for idempotency keys (default: 1 hour)
+        """
+        self.redis = redis_client
+        self.ttl_seconds = ttl_seconds
+        self.in_memory_cache: Dict[str, Dict] = {}  # Fallback cache
+        logger.info(f"✅ Persistent Idempotency Manager initialized (TTL: {ttl_seconds}s)")
+    
+    async def check_duplicate(self, client_order_id: str) -> Optional[Dict]:
+        """Check if order was already submitted (persistent across restarts)."""
+        # Try Redis first
+        if self.redis:
+            try:
+                result = await self.redis.get(f"idempotency:{client_order_id}")
+                if result:
+                    logger.debug(f"🔄 Idempotency hit (Redis): {client_order_id}")
+                    return json.loads(result)
+            except Exception as e:
+                logger.warning(f"Redis idempotency check failed: {e}. Using in-memory cache.")
+        
+        # Fallback to in-memory
+        result = self.in_memory_cache.get(client_order_id)
+        if result:
+            logger.debug(f"🔄 Idempotency hit (memory): {client_order_id}")
+        
+        return result
+    
+    async def record_submission(self, client_order_id: str, result: Dict):
+        """Record successful submission with TTL for automatic cleanup."""
+        # Store in Redis if available
+        if self.redis:
+            try:
+                await self.redis.setex(
+                    f"idempotency:{client_order_id}",
+                    self.ttl_seconds,
+                    json.dumps(result)
+                )
+                logger.debug(f"💾 Idempotency recorded (Redis): {client_order_id}")
+            except Exception as e:
+                logger.warning(f"Redis idempotency recording failed: {e}. Using in-memory cache.")
+        
+        # Always store in memory as fallback
+        self.in_memory_cache[client_order_id] = result
+        
+        # Cleanup old entries (keep last 1000)
+        if len(self.in_memory_cache) > 1000:
+            oldest_keys = list(self.in_memory_cache.keys())[:100]
+            for key in oldest_keys:
+                del self.in_memory_cache[key]
+
+
 class IdempotencyManager:
-    """Ensures idempotent order submission using client_order_id."""
+    """Legacy in-memory idempotency manager (deprecated, use PersistentIdempotencyManager)."""
     
     def __init__(self):
         self.submitted_orders: Dict[str, Dict] = {}  # client_order_id -> result
+        logger.warning("⚠️  Using legacy in-memory IdempotencyManager. Consider upgrading to PersistentIdempotencyManager.")
     
     def generate_client_order_id(self, prefix: str = "ORD") -> str:
         """Generate unique client order ID for idempotency."""
@@ -54,11 +123,14 @@ class IdempotencyManager:
 class SmartRetryManager:
     """
     Handles retries with exponential backoff and idempotency checks.
+    
+    Enhanced with support for persistent idempotency (Redis-backed).
     """
     
-    def __init__(self, config: Optional[RetryConfig] = None):
+    def __init__(self, config: Optional[RetryConfig] = None, idempotency_manager=None):
         self.config = config or RetryConfig()
-        self.idempotency_mgr = IdempotencyManager()
+        # Use provided idempotency manager or create legacy one
+        self.idempotency_mgr = idempotency_manager or IdempotencyManager()
     
     async def execute_with_retry(
         self,

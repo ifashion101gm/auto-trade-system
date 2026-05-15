@@ -25,6 +25,7 @@ from app.notifications.notifier import TelegramNotifier
 from app.events.event_bus import event_bus
 from app.database.models import PaperTrades, TradeProposals
 from app.logging_config import get_logger
+from app.infra.circuit_breaker import SystemCircuitBreaker
 
 logger = get_logger(__name__)
 
@@ -118,6 +119,10 @@ class ExecutionService:
         self.validator = TradeValidator()
         self.notifier = TelegramNotifier()
         
+        # NEW: Circuit breaker for system-wide health monitoring
+        self.circuit_breaker = SystemCircuitBreaker(notifier=self.notifier)
+        logger.info("✅ Circuit Breaker integrated into ExecutionService")
+        
         logger.info(f"✅ Execution Service initialized ({exchange_name.upper()} {'TESTNET' if use_testnet else 'LIVE'})")
     
     async def execute_trade(
@@ -152,6 +157,16 @@ class ExecutionService:
                 )
         
         try:
+            # STEP 0: Circuit breaker health check (NEW - Freqtrade pattern)
+            circuit_state = await self.circuit_breaker.check_system_health()
+            if not circuit_state.can_trade:
+                logger.warning(f"🚫 Trade blocked by circuit breaker: {circuit_state.reason}")
+                return ExecutionResult(
+                    success=False,
+                    status='blocked_by_circuit_breaker',
+                    error=f"Circuit breaker OPEN: {circuit_state.reason}"
+                )
+            
             # STEP 1: Validate request parameters
             validation_result = await self._validate_request(request)
             if not validation_result.success:
