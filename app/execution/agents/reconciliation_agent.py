@@ -1,16 +1,21 @@
 """Reconciliation Agent - Periodic cross-validation of exchange vs database state."""
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 from app.execution.agents.base_agent import BaseAgent
 from app.services.reconciliation_service import PositionReconciliationService
-from app.execution.reconciliation_engine import PositionReconciliationEngine
+
+# Optional import for order reconciliation engine
+try:
+    from app.execution.reconciliation_engine import OrderReconciliationEngine as PositionReconciliationEngine
+except ImportError:
+    PositionReconciliationEngine = None
 
 
 class ReconciliationAgent(BaseAgent):
     """Ensures data integrity between exchange and database."""
     
     def __init__(self, reconciliation_service: PositionReconciliationService,
-                 reconciliation_engine: PositionReconciliationEngine):
+                 reconciliation_engine = None):  # Type: Optional[PositionReconciliationEngine]
         super().__init__("ReconciliationAgent")
         self.reconciliation_service = reconciliation_service
         self.reconciliation_engine = reconciliation_engine
