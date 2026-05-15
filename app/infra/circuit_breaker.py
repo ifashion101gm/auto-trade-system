@@ -23,6 +23,7 @@ from collections import deque
 from app.config import settings
 from app.logging_config import get_logger
 from app.notifications.notifier import TelegramNotifier
+from app.infra.kill_switch import KillSwitch
 
 logger = get_logger(__name__)
 
@@ -374,6 +375,21 @@ class SystemCircuitBreaker:
         if severity in ['critical', 'emergency']:
             logger.warning("🚨 Critical circuit breaker - considering emergency position closure")
             # In production, you might want to close high-risk positions here
+            # Engage global kill switch to prevent further trade submissions
+            try:
+                ks = KillSwitch(notifier=self.notifier, persist_path=getattr(settings, 'KILL_SWITCH_STATE_FILE', '.kill_switch_state.json'))
+                ks.engage(actor='circuit_breaker', reason=reason)
+                logger.critical("Kill switch engaged by circuit breaker")
+            except Exception as e:
+                logger.error(f"Failed to engage kill switch: {e}")
+
+            # Start emergency position closure in background to avoid blocking the breaker
+            try:
+                import asyncio
+                logger.warning("Starting emergency close positions task (background)")
+                asyncio.create_task(self.emergency_close_positions())
+            except Exception as e:
+                logger.error(f"Failed to start emergency close task: {e}")
     
     async def attempt_recovery(self) -> bool:
         """
@@ -462,18 +478,48 @@ class SystemCircuitBreaker:
             exclude_symbols = []
         
         logger.warning("🚨 EMERGENCY: Closing all positions")
-        
+
+        if exclude_symbols is None:
+            exclude_symbols = []
+
+        closed_positions = []
+
         try:
-            # This would integrate with your exchange manager
-            # For now, just log the action
-            logger.warning("Emergency position closure initiated")
-            
-            # Send notification
-            await self.notifier.send_emergency_position_closure(
-                closed_positions=[],
-                reason="Circuit breaker triggered emergency closure"
-            )
-            
+            # If no exchange_manager provided, create one
+            from app.infra.exchange_manager import UnifiedExchangeManager
+
+            em = exchange_manager or UnifiedExchangeManager()
+
+            # Fetch open positions
+            open_positions = await em.get_open_positions()
+
+            # Iterate and close safely
+            for pos in open_positions:
+                symbol = pos.get('symbol') or pos.get('market') or pos.get('instrument')
+                if not symbol:
+                    continue
+
+                if symbol in exclude_symbols:
+                    logger.info(f"Skipping excluded symbol during emergency close: {symbol}")
+                    continue
+
+                try:
+                    logger.warning(f"Attempting emergency close for {symbol}")
+                    res = await em.close_position(symbol)
+                    closed_positions.append({'symbol': symbol, 'result': res})
+                    logger.info(f"Emergency close result for {symbol}: {res}")
+                except Exception as e:
+                    logger.error(f"Failed to close position {symbol}: {e}")
+
+            # Notify about closed positions
+            try:
+                await self.notifier.send_emergency_position_closure(
+                    closed_positions=closed_positions,
+                    reason="Circuit breaker triggered emergency closure"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send emergency position closure alert: {e}")
+
         except Exception as e:
             logger.error(f"Emergency position closure failed: {e}")
     

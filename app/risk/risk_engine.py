@@ -14,13 +14,17 @@ Features:
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
+import json
 import logging
+import os
 import time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.config import settings
+from app.risk.leverage_manager import LeverageManager
+from app.infra.kill_switch import KillSwitch
 from app.database.models import PaperTrades, RiskMetrics
 from app.logging_config import get_logger
 from app.infra.exchange_manager import UnifiedExchangeManager
@@ -54,7 +58,13 @@ class RiskEngine:
     - Slippage and spread conditions
     """
     
-    def __init__(self, db_session: Optional[AsyncSession] = None):
+    def __init__(
+        self,
+        db_session: Optional[AsyncSession] = None,
+        leverage_manager: Optional[LeverageManager] = None,
+        kill_switch: Optional[KillSwitch] = None,
+        app_state: Optional[Any] = None
+    ):
         """
         Initialize risk engine.
         
@@ -86,6 +96,11 @@ class RiskEngine:
         self.open_positions: Dict[str, Dict[str, Any]] = {}  # trade_id -> position_info
         self.total_exposure_usd = 0.0
         self.max_concurrent_positions = getattr(settings, 'RISK_MAX_CONCURRENT_POSITIONS', 3)
+        self.state_file = getattr(settings, 'RISK_STATE_FILE', '.risk_state.json')
+        self.daily_loss_lock_active = False
+        self.drawdown_lock_active = False
+        self.last_risk_state_write: Optional[datetime] = None
+        self.app_state = app_state
         
         # Emergency stop state (Sprint 5)
         self.emergency_stop_active = False
@@ -93,13 +108,94 @@ class RiskEngine:
         self.emergency_stop_timestamp: Optional[datetime] = None
         self.consecutive_infrastructure_failures = 0
         
+        self._load_risk_state()
         logger.info("✅ Risk Engine initialized")
         logger.info(f"   Daily Loss Limit: {self.max_daily_loss_pct:.1%}")
         logger.info(f"   Max Drawdown: {self.max_drawdown_pct:.1%}")
         logger.info(f"   Max Position Size: {self.max_position_size_pct:.1%}")
         logger.info(f"   Max Leverage: {self.max_leverage}x")
         logger.info(f"   Emergency Stop: {'ENABLED' if settings.EMERGENCY_STOP_ENABLED else 'DISABLED'}")
-    
+
+        # Optional components
+        self.leverage_manager = leverage_manager or LeverageManager()
+        self.kill_switch = kill_switch
+
+    def _load_risk_state(self):
+        """Load persisted risk state from disk."""
+        try:
+            if os.path.exists(self.state_file):
+                with open(self.state_file, 'r') as f:
+                    data = json.load(f)
+                    self.daily_loss_lock_active = data.get('daily_loss_lock_active', False)
+                    self.drawdown_lock_active = data.get('drawdown_lock_active', False)
+                    self.daily_pnl = data.get('daily_pnl', self.daily_pnl)
+                    self.daily_pnl_pct = data.get('daily_pnl_pct', self.daily_pnl_pct)
+                    self.current_balance = data.get('current_balance', self.current_balance)
+                    self.peak_balance = data.get('peak_balance', self.peak_balance)
+                    self.today_date = data.get('today_date', self.today_date)
+                    logger.info(f"Loaded risk state from {self.state_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load risk state: {e}")
+
+    def _persist_risk_state(self):
+        """Persist current risk state to disk."""
+        try:
+            payload = {
+                'daily_loss_lock_active': self.daily_loss_lock_active,
+                'drawdown_lock_active': self.drawdown_lock_active,
+                'daily_pnl': self.daily_pnl,
+                'daily_pnl_pct': self.daily_pnl_pct,
+                'current_balance': self.current_balance,
+                'peak_balance': self.peak_balance,
+                'today_date': self.today_date,
+                'last_updated': datetime.now(timezone.utc).isoformat()
+            }
+            with open(self.state_file, 'w') as f:
+                json.dump(payload, f)
+            self.last_risk_state_write = datetime.now(timezone.utc)
+        except Exception as e:
+            logger.warning(f"Failed to persist risk state: {e}")
+
+    async def reset_daily_loss_lock(self, authorized_by: str = 'system') -> bool:
+        """Reset the daily loss lock after manual review."""
+        if not self.daily_loss_lock_active:
+            return False
+        self.daily_loss_lock_active = False
+        self._persist_risk_state()
+        logger.info(f"🔓 Daily loss lock reset by {authorized_by}")
+        return True
+
+    async def reset_drawdown_lock(self, authorized_by: str = 'system') -> bool:
+        """Reset the drawdown lock after manual review."""
+        if not self.drawdown_lock_active:
+            return False
+        self.drawdown_lock_active = False
+        self._persist_risk_state()
+        logger.info(f"🔓 Drawdown lock reset by {authorized_by}")
+        return True
+
+    def _activate_daily_loss_lock(self):
+        """Activate the persistent daily loss lock and optionally engage the kill switch."""
+        if not self.daily_loss_lock_active:
+            self.daily_loss_lock_active = True
+            self._persist_risk_state()
+            logger.critical("🚨 Persistent daily loss lock activated")
+            if self.app_state and hasattr(self.app_state, 'daily_loss_lock'):
+                self.app_state.daily_loss_lock = True
+            if self.kill_switch and not self.kill_switch.is_engaged():
+                self.kill_switch.engage(actor='risk_engine', reason='Daily loss limit breached')
+
+    def _activate_drawdown_lock(self):
+        """Activate the persistent drawdown lock and optionally engage the kill switch."""
+        if not self.drawdown_lock_active:
+            self.drawdown_lock_active = True
+            self._persist_risk_state()
+            logger.critical("🚨 Persistent drawdown lock activated")
+            if self.app_state and hasattr(self.app_state, 'daily_loss_lock'):
+                self.app_state.daily_loss_lock = True
+            if self.kill_switch and not self.kill_switch.is_engaged():
+                self.kill_switch.engage(actor='risk_engine', reason='Max drawdown breached')
+
     async def check_trade_approval(
         self,
         proposal: Dict[str, Any],
@@ -125,7 +221,17 @@ class RiskEngine:
         """
         decision = RiskDecision(approved=True)
         
-        # Check 0: Emergency Stop (instant shutdown) - Sprint 5
+        # Check 0: Kill switch (global manual halt)
+        if self.kill_switch and self.kill_switch.is_engaged():
+            ks = self.kill_switch.get_status()
+            decision.approved = False
+            decision.violations.append(
+                f"KILL SWITCH ENGAGED: {ks.reason} by {ks.engaged_by} (since {ks.timestamp})"
+            )
+            logger.warning("🚫 Trade rejected: Kill switch engaged")
+            return decision
+
+        # Check 1: Emergency Stop (instant shutdown) - Sprint 5
         if self.emergency_stop_active:
             decision.approved = False
             decision.violations.append(
@@ -135,8 +241,27 @@ class RiskEngine:
             logger.warning(f"🚫 Trade rejected: Emergency stop active")
             return decision
         
-        # Check 1: Daily loss limit
+        # Check 1a: Persistent daily loss lock
+        if self.daily_loss_lock_active:
+            decision.approved = False
+            decision.violations.append(
+                "Daily loss lock active: trading halted until manual reset"
+            )
+            logger.warning("🚫 Trade rejected: Daily loss lock active")
+            return decision
+
+        # Check 1b: Persistent drawdown lock
+        if self.drawdown_lock_active:
+            decision.approved = False
+            decision.violations.append(
+                "Drawdown lock active: trading halted until manual reset"
+            )
+            logger.warning("🚫 Trade rejected: Drawdown lock active")
+            return decision
+
+        # Check 2: Daily loss limit
         if self.daily_pnl_pct <= -self.max_daily_loss_pct:
+            self._activate_daily_loss_lock()
             decision.approved = False
             decision.violations.append(
                 f"Daily loss limit reached: {self.daily_pnl_pct:.2%} <= -{self.max_daily_loss_pct:.1%}"
@@ -149,6 +274,7 @@ class RiskEngine:
         decision.current_drawdown_pct = current_drawdown
         
         if current_drawdown >= self.max_drawdown_pct:
+            self._activate_drawdown_lock()
             decision.approved = False
             decision.violations.append(
                 f"Max drawdown exceeded: {current_drawdown:.2%} >= {self.max_drawdown_pct:.1%}"
@@ -176,13 +302,38 @@ class RiskEngine:
                 return decision
         
         # Check 4: Leverage limit
-        if leverage > self.max_leverage:
-            decision.approved = False
-            decision.violations.append(
-                f"Leverage too high: {leverage}x > {self.max_leverage}x"
-            )
-            logger.warning(f"🚫 Leverage limit breached: {leverage}x")
-            return decision
+        # Determine recommended leverage (session + volatility aware)
+        try:
+            symbol = proposal.get('symbol', '')
+            vol_pct = None
+            try:
+                exchange_manager = UnifiedExchangeManager()
+                ticker = await exchange_manager.fetch_ticker(symbol)
+                vol_pct = ticker.get('volatility')
+                await exchange_manager.close()
+            except Exception:
+                vol_pct = None
+
+            recommended = self.leverage_manager.recommend_leverage(symbol=symbol, vol_pct=vol_pct)
+            effective_max = min(self.max_leverage, recommended)
+
+            if leverage > effective_max:
+                decision.approved = False
+                decision.violations.append(
+                    f"Leverage too high: {leverage}x > allowed {effective_max}x (recommended {recommended}x, global max {self.max_leverage}x)"
+                )
+                logger.warning(f"🚫 Leverage limit breached: requested {leverage}x, allowed {effective_max}x")
+                return decision
+        except Exception as e:
+            logger.warning(f"Could not evaluate dynamic leverage: {e}")
+            # Fall back to static check
+            if leverage > self.max_leverage:
+                decision.approved = False
+                decision.violations.append(
+                    f"Leverage too high: {leverage}x > {self.max_leverage}x"
+                )
+                logger.warning(f"🚫 Leverage limit breached: {leverage}x")
+                return decision
         
         # Check 5: Cooldown period
         cooldown_status = self._check_cooldown_period()
@@ -376,6 +527,9 @@ class RiskEngine:
         if current_date != self.today_date:
             await self.reset_daily_counters()
         
+        # Persist current risk state to disk
+        self._persist_risk_state()
+
         # Persist to database if session available
         if self.db_session:
             await self._persist_risk_metrics()
@@ -697,6 +851,8 @@ class RiskEngine:
         self.consecutive_losses = 0
         self.last_loss_time = None
         
+        # Persist current risk state to disk
+        self._persist_risk_state()
         logger.info(f"📅 Daily counters reset (was {old_date}, now {self.today_date})")
     
     def _calculate_drawdown(self) -> float:

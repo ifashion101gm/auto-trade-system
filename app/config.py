@@ -235,6 +235,8 @@ class Settings(BaseSettings):
     # Daily loss and drawdown limits
     RISK_MAX_DAILY_LOSS_PCT: float = 0.03  # 3% daily loss limit
     RISK_MAX_DRAWDOWN_PCT: float = 0.15  # 15% max drawdown
+    RISK_STATE_FILE: str = '.risk_state.json'
+    KILL_SWITCH_STATE_FILE: str = '.kill_switch_state.json'
     
     # Position sizing and leverage
     RISK_MAX_POSITION_SIZE_PCT: float = 0.015  # 1.5% per trade

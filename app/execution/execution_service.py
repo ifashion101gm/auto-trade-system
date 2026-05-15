@@ -23,9 +23,13 @@ from app.risk.risk_engine import RiskEngine
 from app.risk.validator import TradeValidator
 from app.notifications.notifier import TelegramNotifier
 from app.events.event_bus import event_bus
+from app.events.event_store import event_store
 from app.database.models import PaperTrades, TradeProposals
 from app.logging_config import get_logger
 from app.infra.circuit_breaker import SystemCircuitBreaker
+from app.config import settings
+from app.risk.leverage_manager import LeverageManager
+from app.infra.kill_switch import KillSwitch
 
 logger = get_logger(__name__)
 
@@ -115,9 +119,17 @@ class ExecutionService:
             exchange_name=exchange_name,
             use_testnet=use_testnet
         )
-        self.risk_engine = RiskEngine(db_session=None)
-        self.validator = TradeValidator()
+        # Initialize notifier first so KillSwitch can use it
         self.notifier = TelegramNotifier()
+
+        # Configure dynamic leverage manager and global kill switch
+        self.leverage_manager = LeverageManager()
+        self.kill_switch = KillSwitch(notifier=self.notifier, persist_path=getattr(settings, 'KILL_SWITCH_STATE_FILE', '.kill_switch_state.json'))
+
+        # Risk engine uses dynamic leverage manager and respects kill switch
+        self.risk_engine = RiskEngine(db_session=None, leverage_manager=self.leverage_manager, kill_switch=self.kill_switch)
+        self.validator = TradeValidator()
+        
         
         # NEW: Circuit breaker for system-wide health monitoring
         self.circuit_breaker = SystemCircuitBreaker(notifier=self.notifier)
@@ -293,11 +305,15 @@ class ExecutionService:
                 'strategy_name': request.strategy_name or 'manual'
             }
             
-            # Run risk checks
-            risk_decision = await self.risk_engine.check_trade_approval(
-                proposal=proposal,
-                user_id=request.user_id
-            )
+            prev_db_session = self.risk_engine.db_session
+            self.risk_engine.db_session = db_session
+            try:
+                risk_decision = await self.risk_engine.check_trade_approval(
+                    proposal=proposal,
+                    user_id=request.user_id
+                )
+            finally:
+                self.risk_engine.db_session = prev_db_session
             
             if not risk_decision.approved:
                 return ExecutionResult(
@@ -425,7 +441,24 @@ class ExecutionService:
                     await db_session.flush()
                 
                 logger.info(f"Order placed successfully: {order_result.get('order_id')}")
-                
+                await event_store.persist_event(
+                    {
+                        'type': 'ORDER_SUBMITTED',
+                        'payload': {
+                            'proposal_id': proposal_id,
+                            'symbol': request.symbol,
+                            'side': request.side.upper(),
+                            'quantity': request.quantity,
+                            'leverage': request.leverage,
+                            'order_id': order_result.get('order_id'),
+                            'filled_price': order_result.get('price') or request.entry_price,
+                            'filled_quantity': order_result.get('filled', request.quantity),
+                            'timestamp': datetime.utcnow().isoformat()
+                        }
+                    },
+                    db_session,
+                    correlation_id=str(proposal_id)
+                )
                 return ExecutionResult(
                     success=True,
                     order_id=order_result.get('order_id'),
@@ -438,6 +471,23 @@ class ExecutionService:
             except asyncio.TimeoutError:
                 logger.warning(f"Order placement timeout (attempt {attempt + 1}/{max_retries})")
                 if attempt == max_retries - 1:
+                    await event_store.persist_event(
+                        {
+                            'type': 'ORDER_REJECTED',
+                            'payload': {
+                                'proposal_id': proposal_id,
+                                'symbol': request.symbol,
+                                'side': request.side.upper(),
+                                'quantity': request.quantity,
+                                'leverage': request.leverage,
+                                'reason': 'timeout',
+                                'attempts': max_retries,
+                                'timestamp': datetime.utcnow().isoformat()
+                            }
+                        },
+                        db_session,
+                        correlation_id=str(proposal_id)
+                    )
                     return ExecutionResult(
                         success=False,
                         status='failed',
@@ -448,6 +498,23 @@ class ExecutionService:
             except Exception as e:
                 logger.warning(f"Order placement error (attempt {attempt + 1}/{max_retries}): {e}")
                 if attempt == max_retries - 1:
+                    await event_store.persist_event(
+                        {
+                            'type': 'ORDER_REJECTED',
+                            'payload': {
+                                'proposal_id': proposal_id,
+                                'symbol': request.symbol,
+                                'side': request.side.upper(),
+                                'quantity': request.quantity,
+                                'leverage': request.leverage,
+                                'reason': str(e),
+                                'attempts': max_retries,
+                                'timestamp': datetime.utcnow().isoformat()
+                            }
+                        },
+                        db_session,
+                        correlation_id=str(proposal_id)
+                    )
                     return ExecutionResult(
                         success=False,
                         status='failed',
@@ -495,7 +562,21 @@ class ExecutionService:
             await db_session.flush()  # Get ID, parent manages commit
             
             logger.info(f"Trade record created: {trade.id}")
-            
+            await event_store.persist_event(
+                {
+                    'type': 'ORDER_FILLED',
+                    'payload': {
+                        'proposal_id': proposal_id,
+                        'trade_id': trade.id,
+                        'order_id': order_result.order_id,
+                        'filled_price': order_result.filled_price,
+                        'filled_quantity': order_result.filled_quantity,
+                        'timestamp': datetime.utcnow().isoformat()
+                    }
+                },
+                db_session,
+                correlation_id=str(trade.id)
+            )
             return ExecutionResult(
                 success=True,
                 trade_id=trade.id,

@@ -1209,7 +1209,7 @@ class BybitClient:
     
     async def close_position(self, symbol: str) -> Dict[str, Any]:
         """
-        Close an open position with a market order.
+        Close an open position with a market reduce-only order.
         
         Args:
             symbol: Trading pair
@@ -1218,21 +1218,117 @@ class BybitClient:
             Closure order details
         """
         try:
-            # Get current position
-            positions = await self.exchange.fetch_positions([symbol])
-            
-            for pos in positions:
-                if pos.get('contracts') and pos['contracts'] > 0:
-                    # Opposite side to close
-                    side = 'sell' if pos['side'] == 'long' else 'buy'
-                    amount = pos['contracts']
-                    
-                    # Close with market order
-                    return await self.create_market_order(symbol, side, amount)
-            
-            raise Exception(f"No open position for {symbol}")
+            if self.use_pybit:
+                position = await self._fetch_pybit_position(symbol)
+                if not position or float(position.get('size', 0) or 0) <= 0:
+                    raise Exception(f"No open position for {symbol}")
+
+                side = 'Sell' if position.get('side') == 'Buy' else 'Buy'
+                amount = float(position.get('size') or 0)
+                bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, 'linear')
+                position_idx = position.get('positionIdx')
+
+                order_kwargs = {
+                    'category': 'linear',
+                    'symbol': bybit_symbol,
+                    'side': side,
+                    'orderType': 'Market',
+                    'qty': str(amount),
+                    'reduceOnly': True
+                }
+
+                if position_idx is not None:
+                    order_kwargs['positionIdx'] = position_idx
+
+                response = self.pybit_session.place_order(**order_kwargs)
+                self._handle_pybit_error(response, 'place_order')
+                result = response.get('result', {})
+
+                return {
+                    'order_id': result.get('orderId'),
+                    'symbol': result.get('symbol'),
+                    'side': side.lower(),
+                    'type': 'market',
+                    'amount': amount,
+                    'status': 'closed',
+                    'filled': amount,
+                    'remaining': 0,
+                    'cost': result.get('cumExecValue') or 0,
+                    'fee': {},
+                    'timestamp': result.get('createdTime'),
+                    'position_idx': position_idx
+                }
+            else:
+                positions = await self.exchange.fetch_positions([symbol])
+                for pos in positions:
+                    if pos.get('contracts') and pos['contracts'] > 0:
+                        side = 'sell' if pos['side'] == 'long' else 'buy'
+                        amount = pos['contracts']
+                        return await self.create_market_order(symbol, side, amount)
+                raise Exception(f"No open position for {symbol}")
         except Exception as e:
             raise Exception(f"Failed to close position: {str(e)}")
+    
+    async def _fetch_pybit_position(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch current open Pybit position for a symbol.
+
+        Args:
+            symbol: Trading pair in CCXT format
+
+        Returns:
+            Position dictionary or None when no open position exists
+        """
+        bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, 'linear')
+        response = self.pybit_session.get_positions(category='linear', symbol=bybit_symbol)
+        self._handle_pybit_error(response, 'get_positions')
+
+        positions = response.get('result', {}).get('list', [])
+        for pos in positions:
+            try:
+                size = float(pos.get('size') or 0)
+            except (ValueError, TypeError):
+                size = 0
+            if size > 0:
+                return pos
+        return None
+    
+    async def set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        """
+        Set leverage for a specific trading pair.
+        
+        Args:
+            symbol: Trading pair
+            leverage: Leverage multiplier
+            
+        Returns:
+            Confirmation with leverage setting
+        """
+        try:
+            if self.use_pybit:
+                bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, 'linear')
+                try:
+                    response = self.pybit_session.set_leverage(
+                        category='linear',
+                        symbol=bybit_symbol,
+                        buyLeverage=leverage,
+                        sellLeverage=leverage
+                    )
+                except TypeError:
+                    response = self.pybit_session.set_leverage(
+                        category='linear',
+                        symbol=bybit_symbol,
+                        leverage=leverage
+                    )
+                self._handle_pybit_error(response, 'set_leverage')
+                logger.info(f"✅ Bybit leverage set: {leverage}x for {symbol}")
+                return {'status': 'success', 'leverage': leverage, 'symbol': symbol}
+            else:
+                await self.exchange.set_leverage(leverage, symbol)
+                logger.info(f"✅ Leverage set: {leverage}x for {symbol}")
+                return {'status': 'success', 'leverage': leverage, 'symbol': symbol}
+        except Exception as e:
+            raise Exception(f"Failed to set leverage: {str(e)}")
     
     def get_trading_fee_rate(self) -> float:
         """
@@ -1448,9 +1544,28 @@ class BybitClient:
             Confirmation with leverage setting
         """
         try:
-            await self.exchange.set_leverage(leverage, symbol)
-            logger.info(f"✅ Leverage set: {leverage}x for {symbol}")
-            return {'status': 'success', 'leverage': leverage, 'symbol': symbol}
+            if self.use_pybit:
+                bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, 'linear')
+                try:
+                    response = self.pybit_session.set_leverage(
+                        category='linear',
+                        symbol=bybit_symbol,
+                        buyLeverage=leverage,
+                        sellLeverage=leverage
+                    )
+                except TypeError:
+                    response = self.pybit_session.set_leverage(
+                        category='linear',
+                        symbol=bybit_symbol,
+                        leverage=leverage
+                    )
+                self._handle_pybit_error(response, 'set_leverage')
+                logger.info(f"✅ Bybit leverage set: {leverage}x for {symbol}")
+                return {'status': 'success', 'leverage': leverage, 'symbol': symbol}
+            else:
+                await self.exchange.set_leverage(leverage, symbol)
+                logger.info(f"✅ Leverage set: {leverage}x for {symbol}")
+                return {'status': 'success', 'leverage': leverage, 'symbol': symbol}
         except Exception as e:
             raise Exception(f"Failed to set leverage: {str(e)}")
     

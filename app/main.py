@@ -325,6 +325,15 @@ async def init_services():
     state.telegram_agent = TelegramAgent()
     state.telegram_ready = True
     logger.info("✅ Agents initialized")
+
+    # Initialize global KillSwitch for admin control
+    try:
+        from app.infra.kill_switch import KillSwitch
+        state.kill_switch = KillSwitch(notifier=state.telegram_agent, persist_path=getattr(settings, 'KILL_SWITCH_STATE_FILE', '.kill_switch_state.json'))
+        logger.info("✅ KillSwitch initialized and attached to app state")
+    except Exception as e:
+        state.kill_switch = None
+        logger.warning(f"KillSwitch not initialized: {e}")
     
     # Recovery
     async with get_session() as db_session:
@@ -395,6 +404,47 @@ async def init_services():
         critical=False,
         restart_delay=10.0
     )
+
+    # Exchange preflight checks and attach exchange manager to state
+    try:
+        from app.infra.exchange_manager import UnifiedExchangeManager
+
+        state.exchange_manager = UnifiedExchangeManager(
+            exchange_name=settings.ACTIVE_EXCHANGE,
+            use_testnet=settings.BINANCE_TESTNET
+        )
+
+        # If using Bybit, perform Pybit-specific preflight checks
+        if settings.ACTIVE_EXCHANGE.lower() == 'bybit':
+            try:
+                client = getattr(state.exchange_manager, 'client', None)
+                if client and hasattr(client, 'validate_clock_sync'):
+                    ok = await client.validate_clock_sync()
+                    if not ok:
+                        logger.warning("Bybit clock sync check failed - review system clock")
+
+                # Fetch balance for monitoring
+                try:
+                    bal = await state.exchange_manager.fetch_balance()
+                    logger.info(f"Exchange balance preflight: {bal.get('total_usdt', bal)}")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch balance during preflight: {e}")
+
+                # Set conservative leverage for primary trading symbol
+                primary = settings.PRIMARY_TRADING_SYMBOL
+                try:
+                    await state.exchange_manager.set_leverage(primary, settings.GOLD_MAX_LEVERAGE)
+                    logger.info(f"Set default leverage {settings.GOLD_MAX_LEVERAGE}x for {primary}")
+                except Exception as e:
+                    logger.warning(f"Failed to set default leverage on preflight: {e}")
+
+            except Exception as e:
+                logger.warning(f"Bybit preflight checks encountered an issue: {e}")
+
+        logger.info("✅ Exchange manager attached to application state")
+    except Exception as e:
+        state.exchange_manager = None
+        logger.warning(f"Exchange manager not attached during init: {e}")
     
     # Phase 2: Initialize self-healing watchdogs
     logger.info("🔍 Initializing self-healing watchdogs...")
@@ -704,6 +754,50 @@ async def session_info():
 async def news_status():
     """Get news guard status (public)."""
     return state.news_guard.get_status()
+
+
+@app.post("/admin/kill-switch/engage")
+async def admin_kill_switch_engage(payload: Dict[str, str], x_api_key: str | None = Header(default=None)):
+    """Engage global kill switch (admin only)."""
+    require_admin(x_api_key)
+
+    if not state.kill_switch:
+        raise HTTPException(status_code=500, detail="Kill switch not initialized")
+
+    actor = payload.get('actor', 'admin')
+    reason = payload.get('reason', 'manual_engage')
+
+    status = state.kill_switch.engage(actor=actor, reason=reason)
+
+    return {'ok': True, 'status': status.__dict__}
+
+
+@app.post("/admin/kill-switch/disengage")
+async def admin_kill_switch_disengage(payload: Dict[str, str], x_api_key: str | None = Header(default=None)):
+    """Disengage global kill switch (admin only)."""
+    require_admin(x_api_key)
+
+    if not state.kill_switch:
+        raise HTTPException(status_code=500, detail="Kill switch not initialized")
+
+    actor = payload.get('actor', 'admin')
+    reason = payload.get('reason', 'manual_disengage')
+
+    status = state.kill_switch.disengage(actor=actor, reason=reason)
+
+    return {'ok': True, 'status': status.__dict__}
+
+
+@app.get("/admin/kill-switch/status")
+async def admin_kill_switch_status(x_api_key: str | None = Header(default=None)):
+    """Get kill switch status (admin only)."""
+    require_admin(x_api_key)
+
+    if not state.kill_switch:
+        raise HTTPException(status_code=500, detail="Kill switch not initialized")
+
+    status = state.kill_switch.get_status()
+    return {'ok': True, 'status': status.__dict__}
 
 # ============================================================================
 # SIGNAL HANDLING
