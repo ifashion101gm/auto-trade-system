@@ -68,7 +68,9 @@ class OrderReconciliationEngine:
         exchange_name: str = "binance",
         use_testnet: bool = True,
         reconciliation_interval: int = 60,
-        auto_repair_safe: bool = True
+        auto_repair_safe: bool = True,
+        enable_telegram_alerts: bool = True,
+        enable_prometheus_metrics: bool = True
     ):
         """
         Initialize reconciliation engine.
@@ -78,11 +80,15 @@ class OrderReconciliationEngine:
             use_testnet: Use testnet mode
             reconciliation_interval: Seconds between reconciliation runs
             auto_repair_safe: Auto-repair safe mismatches (orphaned orders)
+            enable_telegram_alerts: Send Telegram alerts for critical mismatches
+            enable_prometheus_metrics: Publish metrics to Prometheus
         """
         self.exchange_name = exchange_name
         self.use_testnet = use_testnet
         self.reconciliation_interval = reconciliation_interval
         self.auto_repair_safe = auto_repair_safe
+        self.enable_telegram_alerts = enable_telegram_alerts
+        self.enable_prometheus_metrics = enable_prometheus_metrics
         
         # Initialize components
         self.exchange_manager = UnifiedExchangeManager(
@@ -133,11 +139,12 @@ class OrderReconciliationEngine:
                     self.total_runs += 1
                     self.total_mismatches += result.mismatches_found
                     
-                    # Publish metrics to Prometheus
-                    await self._publish_metrics(result)
+                    # Publish metrics to Prometheus (if enabled)
+                    if self.enable_prometheus_metrics:
+                        await self._publish_metrics(result)
                     
-                    # Send Telegram alerts for critical mismatches
-                    if result.mismatches_found > 0:
+                    # Send Telegram alerts for critical mismatches (if enabled)
+                    if self.enable_telegram_alerts and result.mismatches_found > 0:
                         await self._send_telegram_alerts(result)
                     
             except Exception as e:
@@ -508,14 +515,88 @@ class OrderReconciliationEngine:
             for _ in range(result.mismatches_repaired):
                 metrics.record_reconciliation_repair(repair_type='auto_repair')
             
+            # Record total mismatches found
+            metrics.update_reconciliation_mismatches(
+                mismatch_type='total',
+                count=result.mismatches_found
+            )
+            
             logger.debug(f"📊 Published reconciliation metrics: {result.mismatches_found} mismatches")
             
+        except ImportError:
+            logger.warning("Prometheus metrics not available, skipping metric publication")
         except Exception as e:
             logger.error(f"Failed to publish reconciliation metrics: {e}")
     
     async def _send_telegram_alerts(self, result: ReconciliationResult):
         """
         Send Telegram alerts for critical reconciliation mismatches.
+        Implements alert deduplication to prevent spam.
+        
+        Args:
+            result: ReconciliationResult with detected issues
+        """
+        try:
+            # Import alert manager for deduplication
+            from app.notifications.alert_manager import get_alert_manager
+            alert_mgr = get_alert_manager()
+            
+            # Alert for orphaned orders (safe - auto-repaired)
+            if result.orphaned_orders:
+                for order in result.orphaned_orders:
+                    await alert_mgr.send_alert(
+                        level="WARNING",
+                        title="Orphaned Order Detected",
+                        message=(
+                            f"Trade {order.get('trade_id')} ({order.get('symbol')}) "
+                            f"exists in DB but not on exchange. Auto-repaired."
+                        ),
+                        alert_type=f"orphaned_order_{order.get('trade_id')}",
+                        urgency="normal"
+                    )
+            
+            # Alert for ghost positions (requires review)
+            if result.ghost_positions:
+                for pos in result.ghost_positions:
+                    await alert_mgr.send_alert(
+                        level="CRITICAL",
+                        title="Ghost Position Detected",
+                        message=(
+                            f"Position {pos.get('symbol')} exists on exchange "
+                            f"but not in database. Imported automatically."
+                        ),
+                        alert_type=f"ghost_position_{pos.get('symbol')}",
+                        urgency="high"
+                    )
+            
+            # Alert for status mismatches (requires review)
+            if result.status_mismatches:
+                for mismatch in result.status_mismatches:
+                    db_pos = mismatch.get('db_position', {})
+                    exc_pos = mismatch.get('exchange_position', {})
+                    await alert_mgr.send_alert(
+                        level="WARNING",
+                        title="Status Mismatch Detected",
+                        message=(
+                            f"{db_pos.get('symbol')}: DB={db_pos.get('status')}, "
+                            f"Exchange={exc_pos.get('status')}. Auto-repaired."
+                        ),
+                        alert_type=f"status_mismatch_{db_pos.get('trade_id')}",
+                        urgency="normal"
+                    )
+            
+            logger.info(f"📱 Sent {result.mismatches_alerted} Telegram alerts")
+            
+        except ImportError:
+            logger.warning("AlertManager not available, using legacy notifier")
+            # Fallback to legacy notifier
+            await self._send_legacy_telegram_alerts(result)
+        except Exception as e:
+            logger.error(f"Failed to send Telegram alerts: {e}")
+    
+    async def _send_legacy_telegram_alerts(self, result: ReconciliationResult):
+        """
+        Legacy Telegram alert method (fallback if AlertManager unavailable).
         
         Args:
             result: ReconciliationResult with detected issues
@@ -554,10 +635,10 @@ class OrderReconciliationEngine:
                         requires_review=True
                     )
             
-            logger.info(f"📱 Sent {result.mismatches_alerted} Telegram alerts")
+            logger.info(f"📱 Sent {result.mismatches_alerted} Telegram alerts (legacy)")
             
         except Exception as e:
-            logger.error(f"Failed to send Telegram alerts: {e}")
+            logger.error(f"Failed to send legacy Telegram alerts: {e}")
     
     def get_detailed_status(self) -> Dict[str, Any]:
         """

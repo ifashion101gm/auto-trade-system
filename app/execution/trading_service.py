@@ -28,6 +28,15 @@ from app.execution.state_validator import state_validator
 from app.events.event_bus import event_bus
 from app.execution.self_healing_engine import SelfHealingExecutionEngine
 
+# Resilience Platform imports (Phase 3)
+try:
+    from app.resilience import SystemMode
+    from app.main import state as app_state
+    RESILIENCE_PLATFORM_AVAILABLE = True
+except ImportError:
+    RESILIENCE_PLATFORM_AVAILABLE = False
+    logger.warning("Resilience platform not available in trading service")
+
 logger = get_logger(__name__)
 
 
@@ -961,6 +970,26 @@ class LiveTradingService:
         
         # Execute order if auto-execution is enabled
         if should_auto_execute:
+            # NEW: Check resilience platform state before executing trades
+            if RESILIENCE_PLATFORM_AVAILABLE and hasattr(app_state, 'resilience_manager') and app_state.resilience_manager:
+                current_mode = app_state.resilience_manager.current_mode
+                
+                # Block all trading in certain modes
+                if current_mode.blocks_all_trading():
+                    error_msg = f"🚫 Trading blocked in {current_mode.value} mode"
+                    logger.warning(error_msg)
+                    raise Exception(error_msg)
+                
+                # Block new entries in safe mode
+                if not current_mode.allows_new_entries():
+                    error_msg = f"⚠️ New entries blocked in {current_mode.value} mode"
+                    logger.warning(error_msg)
+                    raise Exception(error_msg)
+                
+                # Log degraded mode warnings
+                if current_mode == SystemMode.DEGRADED:
+                    logger.warning(f"⚠️ Trading in DEGRADED mode - exercising caution")
+            
             # CRITICAL: ALL orders MUST pass through ExecutionService
             # This ensures idempotency, retry logic, verification, and reconciliation
             

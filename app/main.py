@@ -55,6 +55,18 @@ from app.runtime.news_guard import NewsGuard
 # Phase 2: Self-healing watchdogs
 from app.self_healing.watchdogs import WatchdogOrchestrator
 
+# Phase 3: Resilience Platform
+try:
+    from app.resilience import (
+        ResilienceManager,
+        SystemStateMachine,
+        RecoveryExecutor,
+    )
+    RESILIENCE_PLATFORM_AVAILABLE = True
+except ImportError:
+    RESILIENCE_PLATFORM_AVAILABLE = False
+    logger.warning("Resilience platform not available - using legacy fallback")
+
 # ============================================================================
 # METRICS REGISTRY
 # ============================================================================
@@ -135,6 +147,11 @@ class AppState:
         
         # Phase 2: Self-healing watchdogs
         self.watchdog_orchestrator: WatchdogOrchestrator = None
+        
+        # Resilience Platform (Phase 3)
+        self.resilience_manager = None
+        self.state_machine = None
+        self.recovery_executor = None
         
         # Legacy services (for backward compatibility)
         self.sync_agent = None
@@ -381,9 +398,41 @@ async def init_services():
     
     # Phase 2: Initialize self-healing watchdogs
     logger.info("🔍 Initializing self-healing watchdogs...")
+    
+    # Phase 3: Initialize resilience platform (if available)
+    if RESILIENCE_PLATFORM_AVAILABLE:
+        logger.info("🛡️ Initializing resilience platform...")
+        
+        # 1. Create state machine
+        state.state_machine = SystemStateMachine(
+            notifier=state.telegram_agent,  # Use existing Telegram notifier
+            event_bus=event_bus
+        )
+        logger.info("✅ State machine initialized")
+        
+        # 2. Create recovery executor
+        state.recovery_executor = RecoveryExecutor(
+            cooldown_manager=None,  # Created internally
+            notifier=state.telegram_agent
+        )
+        logger.info("✅ Recovery executor initialized")
+        
+        # 3. Create resilience manager (central hub)
+        state.resilience_manager = ResilienceManager(
+            state_machine=state.state_machine,
+            recovery_executor=state.recovery_executor,
+            event_bus=event_bus,
+            notifier=state.telegram_agent
+        )
+        logger.info("✅ Resilience manager initialized")
+    else:
+        logger.warning("⚠️ Resilience platform not available - using legacy mode")
+    
+    # 4. Initialize watchdog orchestrator with resilience manager
     state.watchdog_orchestrator = WatchdogOrchestrator(
         exchange_manager=None,  # Will be set when exchange is initialized
         db_session_factory=get_session,
+        resilience_manager=state.resilience_manager,  # Pass resilience manager!
         api_check_interval=getattr(settings, 'API_WATCHDOG_CHECK_INTERVAL_SEC', 30),
         db_check_interval=getattr(settings, 'DB_WATCHDOG_CHECK_INTERVAL_SEC', 60),
         memory_check_interval=getattr(settings, 'MEMORY_WATCHDOG_CHECK_INTERVAL_SEC', 120),
@@ -563,6 +612,22 @@ app.include_router(trading_router, prefix="/api/v1", tags=["trading"])
 app.include_router(ai_router, prefix="/api/v1", tags=["ai-orchestration"])
 app.include_router(cache_router, prefix="/api/v1", tags=["cache-management"])
 app.include_router(llm_router, prefix="/api/v1", tags=["llm-optimization"])
+
+# Phase 2: Health check and monitoring routes
+try:
+    from app.dashboard.health_api import register_health_routes
+    register_health_routes(app)
+    logger.info("✅ Health check and monitoring API registered")
+except ImportError as e:
+    logger.warning(f"Health API not available (will be added in Phase 2): {e}")
+
+# Phase 3: Resilience platform routes
+try:
+    from app.dashboard.resilience_api import router as resilience_router
+    app.include_router(resilience_router, prefix="/api/v1")
+    logger.info("✅ Resilience platform API registered")
+except ImportError as e:
+    logger.warning(f"Resilience API not available: {e}")
 
 # ============================================================================
 # ADMIN ROUTES

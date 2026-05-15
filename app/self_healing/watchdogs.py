@@ -7,8 +7,12 @@ Provides proactive monitoring and automatic recovery for:
 - Memory usage monitoring (leak detection, GC triggers)
 - Worker queue health (frozen workers, stuck tasks)
 
+REFACTORED: Watchdogs now emit FailureEvents to ResilienceManager instead of
+taking direct recovery actions. This prevents conflicting recovery logic and
+enables coordinated, deterministic healing.
+
 All watchdogs run as background tasks and integrate with the existing
-self-healing architecture via RecoveryAgent and MonitoringAgent.
+self-healing architecture via ResilienceManager.
 """
 import asyncio
 import time
@@ -17,6 +21,19 @@ import psutil
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from loguru import logger
+
+# Import resilience platform components
+try:
+    from app.resilience import (
+        FailureEvent,
+        FailureSeverity,
+        FailureDomain,
+        ResilienceManager,
+    )
+    RESILIENCE_PLATFORM_AVAILABLE = True
+except ImportError:
+    RESILIENCE_PLATFORM_AVAILABLE = False
+    logger.warning("⚠️ Resilience platform not available - using legacy mode")
 
 
 class APIWatchdog:
@@ -35,7 +52,8 @@ class APIWatchdog:
         exchange_manager=None,
         max_latency_ms: float = 5000,
         check_interval_sec: int = 30,
-        consecutive_failure_threshold: int = 3
+        consecutive_failure_threshold: int = 3,
+        resilience_manager=None  # NEW: ResilienceManager instance
     ):
         """
         Initialize API watchdog.
@@ -45,11 +63,13 @@ class APIWatchdog:
             max_latency_ms: Maximum acceptable API latency in milliseconds
             check_interval_sec: How often to check API health
             consecutive_failure_threshold: Number of consecutive failures before alerting
+            resilience_manager: ResilienceManager for coordinated failure handling
         """
         self.exchange_manager = exchange_manager
         self.max_latency_ms = max_latency_ms
         self.check_interval_sec = check_interval_sec
         self.consecutive_failure_threshold = consecutive_failure_threshold
+        self.resilience_manager = resilience_manager  # NEW
         
         # State tracking
         self.consecutive_failures = 0
@@ -61,6 +81,7 @@ class APIWatchdog:
         logger.info(f"   Max Latency: {max_latency_ms}ms")
         logger.info(f"   Check Interval: {check_interval_sec}s")
         logger.info(f"   Failure Threshold: {consecutive_failure_threshold}")
+        logger.info(f"   Resilience Platform: {'Enabled' if resilience_manager else 'Disabled'}")
     
     async def check_api_health(self) -> Dict[str, Any]:
         """
@@ -165,39 +186,67 @@ class APIWatchdog:
     
     async def trigger_degraded_mode(self, endpoint: str, latency: float):
         """
-        Trigger degraded trading mode when latency is high.
+        Emit failure event for degraded mode activation.
         
-        Actions:
-        - Reduce position sizes by 50%
-        - Increase order timeouts
-        - Alert operators
+        REFACTORED: Instead of directly triggering degraded mode, we emit
+        a FailureEvent to ResilienceManager which coordinates the response.
+        
+        Args:
+            endpoint: The API endpoint with high latency
+            latency: Measured latency in milliseconds
         """
         logger.warning(
-            f"🔶 TRIGGERING DEGRADED MODE: {endpoint} latency {latency:.0f}ms "
-            f"exceeds threshold {self.max_latency_ms}ms"
+            f"🔶 HIGH LATENCY DETECTED: {endpoint} took {latency:.0f}ms "
+            f"(threshold: {self.max_latency_ms}ms)"
         )
         
-        # TODO: Integrate with circuit breaker to reduce position size
-        # TODO: Send Telegram alert
-        # TODO: Update trading service configuration
+        # Emit failure event to ResilienceManager
+        if self.resilience_manager and RESILIENCE_PLATFORM_AVAILABLE:
+            await self.resilience_manager.handle_failure(
+                FailureEvent(
+                    source="api_watchdog",
+                    failure_type="high_latency",
+                    severity=FailureSeverity.WARNING,
+                    domain=FailureDomain.API,
+                    metadata={
+                        "endpoint": endpoint,
+                        "latency_ms": latency,
+                        "threshold_ms": self.max_latency_ms
+                    }
+                )
+            )
+        else:
+            # Legacy fallback (TODO: remove after full migration)
+            logger.warning("⚠️ Degraded mode requested (legacy path - no ResilienceManager)")
     
     async def trigger_emergency_stop(self):
         """
-        Trigger emergency stop when API is completely unresponsive.
+        Emit emergency failure event for immediate action.
         
-        Actions:
-        - Block all new trades
-        - Alert operators immediately
-        - Attempt API reconnection
+        REFACTORED: Instead of directly triggering emergency stop, we emit
+        a CRITICAL FailureEvent to ResilienceManager which coordinates response.
         """
         logger.critical(
-            f"🚨 EMERGENCY STOP TRIGGERED: {self.consecutive_failures} consecutive "
-            f"API failures detected"
+            f"🚨 CONSECUTIVE API FAILURES: {self.consecutive_failures} failures detected"
         )
         
-        # TODO: Integrate with circuit breaker to block trading
-        # TODO: Send urgent Telegram alert
-        # TODO: Trigger RecoveryAgent for API reconnection
+        # Emit critical failure event to ResilienceManager
+        if self.resilience_manager and RESILIENCE_PLATFORM_AVAILABLE:
+            await self.resilience_manager.handle_failure(
+                FailureEvent(
+                    source="api_watchdog",
+                    failure_type="consecutive_failures",
+                    severity=FailureSeverity.EMERGENCY,
+                    domain=FailureDomain.API,
+                    metadata={
+                        "consecutive_failures": self.consecutive_failures,
+                        "threshold": self.consecutive_failure_threshold
+                    }
+                )
+            )
+        else:
+            # Legacy fallback (TODO: remove after full migration)
+            logger.critical("🚨 Emergency stop requested (legacy path - no ResilienceManager)")
     
     async def run_periodic_checks(self):
         """Run periodic API health checks in background."""
@@ -239,7 +288,8 @@ class DatabaseWatchdog:
         db_session_factory=None,
         max_pool_utilization_pct: float = 80.0,
         stale_transaction_threshold_sec: int = 300,
-        check_interval_sec: int = 60
+        check_interval_sec: int = 60,
+        resilience_manager=None  # NEW
     ):
         """
         Initialize database watchdog.
@@ -249,11 +299,13 @@ class DatabaseWatchdog:
             max_pool_utilization_pct: Alert when pool usage exceeds this percentage
             stale_transaction_threshold_sec: Consider transaction stale after this duration
             check_interval_sec: How often to check DB health
+            resilience_manager: ResilienceManager for coordinated failure handling
         """
         self.db_session_factory = db_session_factory
         self.max_pool_utilization_pct = max_pool_utilization_pct
         self.stale_transaction_threshold_sec = stale_transaction_threshold_sec
         self.check_interval_sec = check_interval_sec
+        self.resilience_manager = resilience_manager  # NEW
         
         # State tracking
         self.is_running = False
@@ -635,21 +687,32 @@ class QueueWatchdog:
     
     async def trigger_worker_restart(self):
         """
-        Trigger worker restart when queue is frozen.
+        Emit failure event for worker restart.
         
-        Actions:
-        - Log critical error
-        - Send urgent alert
-        - Attempt graceful worker restart
+        REFACTORED: Instead of directly restarting workers, emit a FailureEvent
+        to ResilienceManager which coordinates the response.
         """
         logger.critical(
-            f"🚨 TRIGGERING WORKER RESTART: Queue frozen for "
+            f"🚨 QUEUE FROZEN: No tasks processed in "
             f"{self.frozen_worker_alerts} consecutive checks"
         )
         
-        # TODO: Send urgent Telegram alert
-        # TODO: Trigger graceful worker restart
-        # TODO: Preserve in-flight task state
+        # Emit critical failure event to ResilienceManager
+        if self.resilience_manager and RESILIENCE_PLATFORM_AVAILABLE:
+            await self.resilience_manager.handle_failure(
+                FailureEvent(
+                    source="queue_watchdog",
+                    failure_type="worker_frozen",
+                    severity=FailureSeverity.CRITICAL,
+                    domain=FailureDomain.EXECUTION,
+                    metadata={
+                        "frozen_checks": self.frozen_worker_alerts
+                    }
+                )
+            )
+        else:
+            # Legacy fallback
+            logger.critical("🚨 Worker restart requested (legacy path)")
     
     async def run_periodic_checks(self):
         """Run periodic queue health checks in background."""
@@ -679,6 +742,9 @@ class WatchdogOrchestrator:
     """
     Orchestrates all watchdogs and manages their lifecycle.
     
+    REFACTORED: Now integrates with ResilienceManager for coordinated failure handling.
+    All watchdogs emit FailureEvents to ResilienceManager instead of taking direct actions.
+    
     Provides centralized control for starting/stopping all watchdogs
     and aggregating their health reports.
     """
@@ -687,6 +753,7 @@ class WatchdogOrchestrator:
         self,
         exchange_manager=None,
         db_session_factory=None,
+        resilience_manager=None,  # NEW: ResilienceManager instance
         api_check_interval: int = 30,
         db_check_interval: int = 60,
         memory_check_interval: int = 120,
@@ -698,28 +765,33 @@ class WatchdogOrchestrator:
         Args:
             exchange_manager: UnifiedExchangeManager instance
             db_session_factory: SQLAlchemy async session factory
+            resilience_manager: ResilienceManager for coordinated failure handling
             api_check_interval: API watchdog check interval (seconds)
             db_check_interval: Database watchdog check interval (seconds)
             memory_check_interval: Memory watchdog check interval (seconds)
             queue_check_interval: Queue watchdog check interval (seconds)
         """
-        # Initialize all watchdogs
+        # Initialize all watchdogs with ResilienceManager
         self.api_watchdog = APIWatchdog(
             exchange_manager=exchange_manager,
-            check_interval_sec=api_check_interval
+            check_interval_sec=api_check_interval,
+            resilience_manager=resilience_manager  # NEW
         )
         
         self.db_watchdog = DatabaseWatchdog(
             db_session_factory=db_session_factory,
-            check_interval_sec=db_check_interval
+            check_interval_sec=db_check_interval,
+            resilience_manager=resilience_manager  # NEW
         )
         
         self.memory_watchdog = MemoryWatchdog(
-            check_interval_sec=memory_check_interval
+            check_interval_sec=memory_check_interval,
+            resilience_manager=resilience_manager  # NEW
         )
         
         self.queue_watchdog = QueueWatchdog(
-            check_interval_sec=queue_check_interval
+            check_interval_sec=queue_check_interval,
+            resilience_manager=resilience_manager  # NEW
         )
         
         # Background tasks
