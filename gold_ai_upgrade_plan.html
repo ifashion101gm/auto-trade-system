@@ -1,0 +1,483 @@
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  .page { padding: 1rem 0 2rem; font-family: var(--font-sans); }
+
+  .hero { background: linear-gradient(135deg, #0d1f0d 0%, #162016 60%, #0a1a0a 100%); border-radius: 14px; padding: 1.75rem; margin-bottom: 1.75rem; position: relative; overflow: hidden; }
+  .hero::after { content: ''; position: absolute; top: 0; right: 0; width: 200px; height: 100%; background: radial-gradient(circle at 80% 50%, rgba(29,158,117,0.15), transparent 70%); pointer-events: none; }
+  .hero-eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: #5DCAA5; margin-bottom: 0.4rem; }
+  .hero-title { font-size: 22px; font-weight: 500; color: #fff; margin-bottom: 0.5rem; line-height: 1.3; }
+  .hero-title span { color: #9FE1CB; }
+  .hero-desc { font-size: 13px; color: rgba(255,255,255,0.55); line-height: 1.7; max-width: 520px; }
+  .hero-pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 1rem; }
+  .hero-pill { font-size: 11px; font-weight: 500; padding: 3px 10px; border-radius: 20px; background: rgba(93,202,165,0.15); color: #9FE1CB; border: 0.5px solid rgba(93,202,165,0.3); }
+
+  .nav { display: flex; gap: 4px; border-bottom: 0.5px solid var(--color-border-tertiary); margin-bottom: 1.5rem; overflow-x: auto; scrollbar-width: none; }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav-btn { background: none; border: none; cursor: pointer; font-size: 13px; font-weight: 500; color: var(--color-text-secondary); padding: 9px 13px; white-space: nowrap; border-bottom: 2px solid transparent; margin-bottom: -0.5px; transition: color 0.15s, border-color 0.15s; }
+  .nav-btn.active { color: #0F6E56; border-bottom-color: #1D9E75; }
+  .nav-btn:hover:not(.active) { color: var(--color-text-primary); }
+
+  .section { display: none; }
+  .section.active { display: block; }
+
+  .card { background: var(--color-background-primary); border: 0.5px solid var(--color-border-tertiary); border-radius: 12px; padding: 1.25rem; margin-bottom: 1rem; }
+  .card-green { border-left: 3px solid #1D9E75; }
+  .card-amber { border-left: 3px solid #BA7517; }
+  .card-red { border-left: 3px solid #D85A30; }
+  .card-purple { border-left: 3px solid #534AB7; }
+  .card-blue { border-left: 3px solid #185FA5; }
+  .card h3 { font-size: 14px; font-weight: 600; color: var(--color-text-primary); margin-bottom: 0.6rem; }
+  .card p, .card li { font-size: 13px; color: var(--color-text-secondary); line-height: 1.7; }
+  .card ul { padding-left: 1.1rem; }
+  .card code { font-family: var(--font-mono); font-size: 11.5px; background: var(--color-background-secondary); padding: 2px 5px; border-radius: 4px; color: var(--color-text-primary); }
+
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+  .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 0.75rem; }
+
+  .metric { background: var(--color-background-secondary); border-radius: 10px; padding: 0.9rem 1rem; }
+  .metric-label { font-size: 11px; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.3rem; }
+  .metric-value { font-size: 20px; font-weight: 600; color: var(--color-text-primary); }
+  .metric-sub { font-size: 11px; color: var(--color-text-secondary); margin-top: 0.2rem; }
+
+  .code-block { background: #0a0f0a; border-radius: 10px; padding: 1rem 1.1rem; font-family: var(--font-mono); font-size: 12px; overflow-x: auto; margin: 0.75rem 0; border: 0.5px solid rgba(255,255,255,0.06); line-height: 1.7; }
+  .kw { color: #7aa2f7; } .fn { color: #9ece6a; } .st { color: #e0af68; } .cm { color: #565f89; } .hl { background: rgba(29,158,117,0.15); border-left: 2px solid #1D9E75; padding-left: 4px; margin-left: -4px; display: block; }
+
+  .gap-item { display: flex; align-items: flex-start; gap: 0.75rem; padding: 0.85rem 0; border-bottom: 0.5px solid var(--color-border-tertiary); }
+  .gap-item:last-child { border: none; }
+  .gap-badge { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 20px; }
+  .gap-critical { background: rgba(216,90,48,0.12); color: #993C1D; }
+  .gap-high { background: rgba(186,117,23,0.12); color: #633806; }
+  .gap-medium { background: rgba(29,158,117,0.12); color: #085041; }
+  .gap-title { font-size: 13px; font-weight: 600; color: var(--color-text-primary); margin-bottom: 2px; }
+  .gap-file { font-size: 12px; color: var(--color-text-secondary); }
+
+  .step { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: flex-start; }
+  .step-dot { min-width: 26px; height: 26px; border-radius: 50%; background: rgba(29,158,117,0.15); color: #0F6E56; font-size: 12px; font-weight: 600; display: flex; align-items: center; justify-content: center; flex-shrink: 0; border: 1px solid rgba(29,158,117,0.3); }
+  .step-title { font-size: 13px; font-weight: 600; color: var(--color-text-primary); margin-bottom: 3px; }
+  .step-desc { font-size: 12.5px; color: var(--color-text-secondary); line-height: 1.6; }
+
+  .tbl { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .tbl th { text-align: left; padding: 7px 10px; font-weight: 500; font-size: 11px; color: var(--color-text-secondary); border-bottom: 0.5px solid var(--color-border-tertiary); text-transform: uppercase; letter-spacing: 0.06em; }
+  .tbl td { padding: 8px 10px; border-bottom: 0.5px solid var(--color-border-tertiary); vertical-align: top; color: var(--color-text-primary); }
+  .tbl tr:last-child td { border: none; }
+  .tbl tr:hover td { background: var(--color-background-secondary); }
+
+  .tag { display: inline-block; font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 12px; }
+  .tag-green { background: rgba(29,158,117,0.1); color: #085041; }
+  .tag-amber { background: rgba(186,117,23,0.1); color: #633806; }
+  .tag-red { background: rgba(216,90,48,0.1); color: #993C1D; }
+  .tag-purple { background: rgba(83,74,183,0.1); color: #26215C; }
+
+  .q-card { background: var(--color-background-secondary); border-radius: 10px; padding: 1rem 1.1rem; margin-bottom: 0.75rem; cursor: pointer; transition: border-color 0.15s; border: 0.5px solid var(--color-border-tertiary); }
+  .q-card:hover { border-color: #1D9E75; background: var(--color-background-primary); }
+  .q-type { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; color: #1D9E75; margin-bottom: 0.3rem; }
+  .q-text { font-size: 13px; color: var(--color-text-primary); line-height: 1.6; }
+
+  .sec-h { display: flex; align-items: center; gap: 10px; margin-bottom: 1.1rem; }
+  .sec-icon { width: 30px; height: 30px; border-radius: 8px; background: rgba(29,158,117,0.12); display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+  .sec-title { font-size: 15px; font-weight: 600; color: var(--color-text-primary); }
+  .sec-sub { font-size: 12px; color: var(--color-text-secondary); margin-top: 1px; }
+</style>
+
+<div class="page">
+  <div class="hero">
+    <div class="hero-eyebrow">Codebase Upgrade Plan · auto-trade-system-main</div>
+    <div class="hero-title">Upgrade to <span>AI-Powered Gold Trading</span><br>for Maximum Profit</div>
+    <div class="hero-desc">Full audit of your existing system — 704 files, 6.9MB — mapped to precise, file-level upgrades that turn your XAUUSDT infrastructure into a profitable AI gold bot.</div>
+    <div class="hero-pills">
+      <span class="hero-pill">XAUUSDT (Bybit Live)</span>
+      <span class="hero-pill">5 Gap Areas Found</span>
+      <span class="hero-pill">3 AI Upgrades</span>
+      <span class="hero-pill">Ready Infrastructure</span>
+    </div>
+  </div>
+
+  <div class="nav">
+    <button class="nav-btn active" onclick="show('audit')">🔍 Audit</button>
+    <button class="nav-btn" onclick="show('gaps')">⚠️ Gaps Found</button>
+    <button class="nav-btn" onclick="show('upgrade1')">🧠 AI Layer Fix</button>
+    <button class="nav-btn" onclick="show('upgrade2')">📈 Strategy Fix</button>
+    <button class="nav-btn" onclick="show('upgrade3')">🗞️ Macro + News</button>
+    <button class="nav-btn" onclick="show('roadmap')">🗺️ Roadmap</button>
+    <button class="nav-btn" onclick="show('money')">💰 Profit Path</button>
+    <button class="nav-btn" onclick="show('questions')">❓ Questions</button>
+  </div>
+
+  <!-- AUDIT -->
+  <div id="audit" class="section active">
+    <div class="sec-h"><div class="sec-icon">🔍</div><div><div class="sec-title">What Your System Already Has</div><div class="sec-sub">Strengths identified from your 704-file codebase</div></div></div>
+
+    <div class="grid-3" style="margin-bottom:1.25rem">
+      <div class="metric"><div class="metric-label">Primary Symbol</div><div class="metric-value">XAUUSDT</div><div class="metric-sub">Bybit perpetual — already set</div></div>
+      <div class="metric"><div class="metric-label">Exchange</div><div class="metric-value">Bybit Live</div><div class="metric-sub">Demo validated, live ready</div></div>
+      <div class="metric"><div class="metric-label">AI Agents</div><div class="metric-value">Wired</div><div class="metric-sub">OpenRouter + Claude + GPT-4o</div></div>
+      <div class="metric"><div class="metric-label">Risk Engine</div><div class="metric-value">Full</div><div class="metric-sub">Circuit breaker, kill switch</div></div>
+      <div class="metric"><div class="metric-label">Infra</div><div class="metric-value">Enterprise</div><div class="metric-sub">Redis, Postgres, Prometheus</div></div>
+      <div class="metric"><div class="metric-label">Strategies</div><div class="metric-value">3 + 1</div><div class="metric-sub">Trend, MR, Breakout + Gold reversal</div></div>
+    </div>
+
+    <div class="card card-green">
+      <h3>✅ What's Production-Ready</h3>
+      <table class="tbl" style="margin-top:0.5rem">
+        <tr><th>Component</th><th>File</th><th>Status</th></tr>
+        <tr><td>Bybit connector</td><td><code>app/infra/bybit_client.py</code></td><td><span class="tag tag-green">Live-ready</span></td></tr>
+        <tr><td>Gold strategy skeleton</td><td><code>app/strategies/gold_opening_reversal.py</code></td><td><span class="tag tag-amber">Stub — needs logic</span></td></tr>
+        <tr><td>AI filter</td><td><code>app/strategy/ai_filter/ai_filter.py</code></td><td><span class="tag tag-amber">Wired, LLM disabled</span></td></tr>
+        <tr><td>News guard</td><td><code>app/runtime/news_guard.py</code></td><td><span class="tag tag-amber">Built, no API feed</span></td></tr>
+        <tr><td>Orchestrator (LLM)</td><td><code>app/ai_agents/orchestrator.py</code></td><td><span class="tag tag-green">Working w/ OpenRouter</span></td></tr>
+        <tr><td>Risk engine</td><td><code>app/risk/risk_engine.py</code></td><td><span class="tag tag-green">Full — circuit breaker</span></td></tr>
+        <tr><td>Telegram alerts</td><td><code>app/notifications/notifier.py</code></td><td><span class="tag tag-green">Production-ready</span></td></tr>
+        <tr><td>Indicators (ATR/RSI/EMA)</td><td><code>app/strategy/indicators.py</code></td><td><span class="tag tag-green">Tested pure functions</span></td></tr>
+        <tr><td>Session scheduler</td><td><code>app/runtime/session_scheduler.py</code></td><td><span class="tag tag-green">London + NY sessions</span></td></tr>
+        <tr><td>Self-healing watchdogs</td><td><code>app/self_healing/watchdogs.py</code></td><td><span class="tag tag-green">Full crash recovery</span></td></tr>
+      </table>
+    </div>
+  </div>
+
+  <!-- GAPS -->
+  <div id="gaps" class="section">
+    <div class="sec-h"><div class="sec-icon">⚠️</div><div><div class="sec-title">5 Critical Gaps Blocking Profit</div><div class="sec-sub">Exact files, exact problems, exact fixes</div></div></div>
+
+    <div class="card card-red" style="margin-bottom:1rem">
+      <div class="gap-item">
+        <span class="gap-badge gap-critical">Critical</span>
+        <div><div class="gap-title">Gap 1 — Gold pattern detection is a stub (returns RSI only)</div><div class="gap-file"><code>app/strategies/gold_opening_reversal.py</code> → <code>detect_reversal_pattern()</code> line 212: "TODO: Implement actual pattern detection logic"</div><p style="margin-top:5px">This is the core signal generator. It currently only checks RSI &lt;30 / &gt;70 — no pin bars, no engulfing candles, no multi-indicator confluence. Every signal produced is a coin flip.</p></div>
+      </div>
+      <div class="gap-item">
+        <span class="gap-badge gap-critical">Critical</span>
+        <div><div class="gap-title">Gap 2 — AI Filter is completely bypassed (no LLM calls)</div><div class="gap-file"><code>app/strategy/ai_filter/ai_filter.py</code> → <code>__init__</code> line 22: <code>self.router = None</code></div><p style="margin-top:5px">The AI validation layer exists and is architecturally wired in — but <code>self.router = None</code> means all signals skip LLM validation and fall back to rule-based logic. Your Anthropic API key is in <code>config.py</code> but never used here.</p></div>
+      </div>
+      <div class="gap-item">
+        <span class="gap-badge gap-high">High</span>
+        <div><div class="gap-title">Gap 3 — NewsGuard has no data feed (manually populated only)</div><div class="gap-file"><code>app/runtime/news_guard.py</code> → <code>load_upcoming_events()</code> line ~190: "TODO: Integrate with economic calendar API"</div><p style="margin-top:5px">NewsGuard architecture is solid — but the calendar is empty unless you manually add events. Gold is the most news-sensitive commodity. Without live CPI/FOMC feeds, you're trading blind into major events.</p></div>
+      </div>
+      <div class="gap-item">
+        <span class="gap-badge gap-high">High</span>
+        <div><div class="gap-title">Gap 4 — Missing gold-specific indicators (VWAP, S/R levels, gold/USD correlation)</div><div class="gap-file"><code>app/strategy/indicators.py</code> — has ATR, RSI, SMA, EMA only. No VWAP, no pivot points, no DXY correlation.</div><p style="margin-top:5px">Gold price correlates inversely with DXY (USD strength index). Without this filter, you'll take long positions when the dollar is surging — a major source of false signals.</p></div>
+      </div>
+      <div class="gap-item" style="border:none">
+        <span class="gap-badge gap-medium">Medium</span>
+        <div><div class="gap-title">Gap 5 — Backtesting engine is a stub</div><div class="gap-file"><code>app/backtesting/engine.py</code> — 3 lines, no implementation</div><p style="margin-top:5px">No ability to validate strategy improvements before going live. You're flying blind on parameter changes.</p></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- UPGRADE 1: AI LAYER -->
+  <div id="upgrade1" class="section">
+    <div class="sec-h"><div class="sec-icon">🧠</div><div><div class="sec-title">Fix 1 — Activate the AI Filter (Claude API)</div><div class="sec-sub">File: <code>app/strategy/ai_filter/ai_filter.py</code></div></div></div>
+
+    <div class="card card-green" style="margin-bottom:1rem">
+      <h3>What to change — activate the router with Anthropic directly</h3>
+      <p style="margin-bottom:0.75rem">Your <code>.env</code> already has <code>ANTHROPIC_API_KEY</code>. The AI filter has the prompt built (<code>_build_validation_prompt()</code>) but <code>self.router = None</code>. Replace with a direct Anthropic call:</p>
+      <div class="code-block"><span class="cm"># app/strategy/ai_filter/ai_filter.py</span>
+<span class="kw">import</span> anthropic, json
+<span class="kw">from</span> app.config <span class="kw">import</span> settings
+
+<span class="kw">class</span> <span class="fn">AIFilter</span>:
+    <span class="kw">def</span> <span class="fn">__init__</span>(self, min_confidence_threshold: float = 0.6):
+        self.min_confidence_threshold = min_confidence_threshold
+<span class="hl">        self.client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        self.model = "claude-sonnet-4-20250514"</span>
+
+    <span class="kw">async def</span> <span class="fn">validate_signal</span>(self, signal, market_context) -> Optional[SignalProposal]:
+        <span class="kw">if</span> signal.confidence < self.min_confidence_threshold:
+            <span class="kw">return</span> None
+<span class="hl">        try:
+            prompt = self._build_validation_prompt(signal, market_context)
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=400,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            result = json.loads(response.content[0].text)
+            if not result.get("approve", False):
+                return None
+            signal.confidence = result.get("validated_confidence", signal.confidence)
+            signal.metadata["ai_reasoning"] = result.get("reasoning", "")
+            signal.metadata["ai_validated"] = True
+            return signal
+        except Exception as e:
+            logger.error(f"AI validation failed: {e}")
+            return self._rule_based_validation(signal, market_context)</span>
+</div>
+      <p>Your existing <code>_build_validation_prompt()</code> method already builds the right prompt — you just need the execution layer above. Zero architecture change.</p>
+    </div>
+
+    <div class="card card-purple">
+      <h3>Upgrade the AI prompt for gold-specific context</h3>
+      <p style="margin-bottom:0.6rem">Replace the generic prompt in <code>_build_validation_prompt()</code> with a gold-aware version:</p>
+      <div class="code-block"><span class="kw">def</span> <span class="fn">_build_validation_prompt</span>(self, signal, market_context) -> str:
+    <span class="kw">return</span> <span class="st">f"""You are a gold futures trading analyst. Validate this XAUUSDT signal.
+
+Signal: {signal.side.upper()} @ ${signal.entry_price:,.2f}
+Stop Loss: ${signal.stop_loss:,.2f} | Take Profit: ${signal.take_profit:,.2f}
+Strategy: {signal.strategy_name} | Confidence: {signal.confidence:.0%}
+Session: {market_context.get('session', 'unknown')} | ATR: {market_context.get('atr', 'N/A')}
+
+Market Context:
+- Regime: {market_context.get('regime', 'Unknown')}
+- DXY trend: {market_context.get('dxy_trend', 'unknown')} (inverse to gold)
+- News guard safe: {market_context.get('news_safe', True)}
+- Volume vs avg: {market_context.get('volume_ratio', 1.0):.1f}x
+
+APPROVE only if:
+1. Signal direction aligns with session bias (London = mean reversion, NY = breakout)
+2. DXY is NOT surging against signal direction (for LONG: DXY must be flat/falling)
+3. No major news event within 45 minutes
+4. ATR justifies the stop distance (stop >= 0.8x ATR)
+
+Respond ONLY with valid JSON:
+{{"approve": true/false, "validated_confidence": 0.0-1.0, "reasoning": "one sentence"}}"""</span>
+</div>
+    </div>
+  </div>
+
+  <!-- UPGRADE 2: STRATEGY -->
+  <div id="upgrade2" class="section">
+    <div class="sec-h"><div class="sec-icon">📈</div><div><div class="sec-title">Fix 2 — Real Pattern Detection in Gold Strategy</div><div class="sec-sub">File: <code>app/strategies/gold_opening_reversal.py</code></div></div></div>
+
+    <div class="card card-green" style="margin-bottom:1rem">
+      <h3>Replace the RSI-only stub with multi-indicator confluence</h3>
+      <div class="code-block"><span class="kw">def</span> <span class="fn">detect_reversal_pattern</span>(self, market_data) -> tuple:
+    indicators = market_data.get(<span class="st">'indicators'</span>, {})
+    ohlcv = market_data.get(<span class="st">'ohlcv'</span>, [])
+    rsi = indicators.get(<span class="st">'rsi'</span>, 50)
+    atr = indicators.get(<span class="st">'atr'</span>, 0)
+    ema_20 = indicators.get(<span class="st">'ema_20'</span>, 0)
+    ema_50 = indicators.get(<span class="st">'ema_50'</span>, 0)
+    price = market_data.get(<span class="st">'price'</span>, 0)
+    confidence = 0.0
+    signal_type = None
+
+<span class="hl">    # --- Pin bar detection ---
+    if len(ohlcv) >= 2:
+        c = ohlcv[-1]  # [ts, open, high, low, close, vol]
+        body = abs(c[4] - c[1])
+        upper_wick = c[2] - max(c[1], c[4])
+        lower_wick = min(c[1], c[4]) - c[3]
+        # Bullish pin bar: long lower wick, small body
+        if lower_wick > body * 2 and lower_wick > upper_wick * 2:
+            signal_type = 'LONG'
+            confidence += 0.30
+        # Bearish pin bar: long upper wick, small body
+        elif upper_wick > body * 2 and upper_wick > lower_wick * 2:
+            signal_type = 'SHORT'
+            confidence += 0.30
+
+    # --- RSI confluence ---
+    if signal_type == 'LONG' and rsi < 40:
+        confidence += 0.20
+    elif signal_type == 'SHORT' and rsi > 60:
+        confidence += 0.20
+
+    # --- EMA trend alignment ---
+    if signal_type == 'LONG' and ema_20 > ema_50 and price > ema_20:
+        confidence += 0.15  # Pullback to EMA in uptrend
+    elif signal_type == 'SHORT' and ema_20 < ema_50 and price < ema_20:
+        confidence += 0.15
+
+    # --- Volume confirmation ---
+    vol_avg = indicators.get('vol_avg', 0)
+    current_vol = ohlcv[-1][5] if ohlcv else 0
+    if vol_avg > 0 and current_vol > vol_avg * 1.2:
+        confidence += 0.10  # Volume spike confirms move</span>
+
+    <span class="kw">return</span> (signal_type, round(confidence, 2)) <span class="kw">if</span> signal_type <span class="kw">else</span> (None, 0.0)
+</div>
+    </div>
+
+    <div class="card card-amber">
+      <h3>Add missing indicators to <code>app/strategy/indicators.py</code></h3>
+      <div class="code-block"><span class="kw">def</span> <span class="fn">calculate_vwap</span>(ohlcv: list) -> float:
+    <span class="st">"""Volume-Weighted Average Price — gold intraday anchor."""</span>
+    cumulative_tp_vol = sum((c[2]+c[3]+c[4])/3 * c[5] <span class="kw">for</span> c <span class="kw">in</span> ohlcv)
+    total_vol = sum(c[5] <span class="kw">for</span> c <span class="kw">in</span> ohlcv)
+    <span class="kw">return</span> cumulative_tp_vol / total_vol <span class="kw">if</span> total_vol > 0 <span class="kw">else</span> 0.0
+
+<span class="kw">def</span> <span class="fn">calculate_ema</span>(prices: list, period: int) -> float:
+    <span class="st">"""Exponential Moving Average."""</span>
+    k = 2 / (period + 1)
+    ema = prices[0]
+    <span class="kw">for</span> p <span class="kw">in</span> prices[1:]:
+        ema = p * k + ema * (1 - k)
+    <span class="kw">return</span> ema
+
+<span class="kw">def</span> <span class="fn">calculate_dxy_bias</span>(dxy_change_pct: float) -> str:
+    <span class="st">"""Gold/USD inverse correlation filter.
+    DXY rising = gold headwind for longs.
+    DXY falling = gold tailwind for longs."""</span>
+    <span class="kw">if</span> dxy_change_pct > 0.3: <span class="kw">return</span> <span class="st">"bearish_gold"</span>
+    <span class="kw">elif</span> dxy_change_pct < -0.3: <span class="kw">return</span> <span class="st">"bullish_gold"</span>
+    <span class="kw">else</span>: <span class="kw">return</span> <span class="st">"neutral"</span>
+</div>
+    </div>
+  </div>
+
+  <!-- UPGRADE 3: MACRO + NEWS -->
+  <div id="upgrade3" class="section">
+    <div class="sec-h"><div class="sec-icon">🗞️</div><div><div class="sec-title">Fix 3 — Live News Calendar Feed for NewsGuard</div><div class="sec-sub">File: <code>app/runtime/news_guard.py</code> → <code>load_upcoming_events()</code></div></div></div>
+
+    <div class="card card-green" style="margin-bottom:1rem">
+      <h3>Connect NewsGuard to a live economic calendar API</h3>
+      <p style="margin-bottom:0.7rem">Your <code>NewsGuard</code> architecture is complete — it just needs data. Use the free Finnhub economic calendar (your <code>.env</code> already has API key infra). Replace the stub <code>load_upcoming_events()</code>:</p>
+      <div class="code-block"><span class="kw">import</span> httpx
+<span class="kw">from</span> datetime <span class="kw">import</span> datetime, timedelta, timezone
+
+<span class="kw">async def</span> <span class="fn">load_upcoming_events</span>(self):
+    <span class="st">"""Fetch live economic calendar from Finnhub API."""</span>
+    now = datetime.now(timezone.utc)
+    end = now + timedelta(days=7)
+    url = <span class="st">f"https://finnhub.io/api/v1/calendar/economic"</span>
+    params = {
+        <span class="st">"from"</span>: now.strftime(<span class="st">"%Y-%m-%d"</span>),
+        <span class="st">"to"</span>: end.strftime(<span class="st">"%Y-%m-%d"</span>),
+        <span class="st">"token"</span>: settings.FINNHUB_API_KEY  <span class="cm"># add to .env</span>
+    }
+<span class="hl">    GOLD_IMPACTING_EVENTS = {
+        "CPI", "Fed Interest Rate Decision", "FOMC",
+        "NFP", "Non-Farm Payrolls", "Powell",
+        "PPI", "PCE", "GDP", "Unemployment Rate"
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.get(url, params=params, timeout=10)
+        data = r.json().get("economicCalendar", [])
+    for event in data:
+        if event.get("impact") == "high":
+            if any(kw in event.get("event","") for kw in GOLD_IMPACTING_EVENTS):
+                self.add_event(
+                    event_type=NewsEventType.FOMC,  # generalize
+                    scheduled_time=datetime.fromisoformat(event["time"]),
+                    impact="high",
+                    description=event["event"]
+                )</span>
+    logger.info(f"✅ NewsGuard loaded {len(self.events)} gold-impacting events")
+</div>
+    </div>
+
+    <div class="card card-blue">
+      <h3>Schedule auto-refresh in <code>app/main.py</code></h3>
+      <p style="margin-bottom:0.6rem">Your <code>app/main.py</code> already has a <code>news_guard</code> instance (line 145). Add a daily refresh task in the startup sequence:</p>
+      <div class="code-block"><span class="cm"># In app/main.py — add to startup tasks</span>
+<span class="kw">async def</span> <span class="fn">refresh_news_calendar</span>():
+    <span class="st">"""Refresh economic calendar daily at 06:00 UTC."""</span>
+    <span class="kw">while True</span>:
+        <span class="kw">await</span> state.news_guard.load_upcoming_events()
+        state.news_guard.clear_past_events()
+        logger.info(<span class="st">"📅 News calendar refreshed"</span>)
+        <span class="kw">await</span> asyncio.sleep(86400)  <span class="cm"># 24h</span>
+
+<span class="cm"># Add to startup in lifespan():</span>
+asyncio.create_task(refresh_news_calendar())
+</div>
+    </div>
+  </div>
+
+  <!-- ROADMAP -->
+  <div id="roadmap" class="section">
+    <div class="sec-h"><div class="sec-icon">🗺️</div><div><div class="sec-title">3-Week Upgrade Roadmap</div><div class="sec-sub">Exact sequence to go from current state to profitable AI gold bot</div></div></div>
+
+    <table class="tbl" style="margin-bottom:1.25rem">
+      <tr><th>Week</th><th>Task</th><th>File(s)</th><th>Impact</th><th>Effort</th></tr>
+      <tr><td><strong>Week 1</strong></td><td>Activate AI filter with Anthropic API</td><td><code>ai_filter.py</code></td><td><span class="tag tag-green">+Signal quality</span></td><td>2h</td></tr>
+      <tr><td></td><td>Replace RSI-only stub with pin bar + confluence</td><td><code>gold_opening_reversal.py</code></td><td><span class="tag tag-green">+Win rate</span></td><td>4h</td></tr>
+      <tr><td></td><td>Add VWAP + EMA + DXY indicators</td><td><code>indicators.py</code></td><td><span class="tag tag-green">+Accuracy</span></td><td>2h</td></tr>
+      <tr><td><strong>Week 2</strong></td><td>Connect NewsGuard to Finnhub calendar</td><td><code>news_guard.py</code></td><td><span class="tag tag-purple">-Risk</span></td><td>3h</td></tr>
+      <tr><td></td><td>Add daily calendar refresh task</td><td><code>main.py</code></td><td><span class="tag tag-purple">-News slippage</span></td><td>1h</td></tr>
+      <tr><td></td><td>Update gold AI prompt with DXY + session bias</td><td><code>ai_filter.py</code></td><td><span class="tag tag-green">+AI quality</span></td><td>1h</td></tr>
+      <tr><td><strong>Week 3</strong></td><td>Build simple VectorBT backtest for gold strategy</td><td><code>app/backtesting/engine.py</code></td><td><span class="tag tag-amber">Validation</span></td><td>6h</td></tr>
+      <tr><td></td><td>Paper trade 5 days on Bybit demo</td><td>Config only</td><td><span class="tag tag-amber">Proof</span></td><td>0h (auto)</td></tr>
+      <tr><td></td><td>Go live on Bybit XAUUSDT with 0.01 BTC position</td><td><code>.env</code> switch</td><td><span class="tag tag-green">Live profits</span></td><td>30min</td></tr>
+    </table>
+
+    <div class="card card-red">
+      <h3>⚠️ Do These BEFORE Going Live</h3>
+      <ul>
+        <li>Set <code>GOLD_RISK_PER_TRADE=0.005</code> (0.5%) not 1% for first 2 weeks live</li>
+        <li>Set <code>GOLD_MIN_CONFIDENCE=0.72</code> — raise from 0.65 until you have 50+ live trades of data</li>
+        <li>Verify kill switch is enabled: <code>app/infra/kill_switch.py</code> — already built, just confirm wired to main loop</li>
+        <li>Set <code>GOLD_MAX_LEVERAGE=3</code> — your config has 5x; start at 3x during live validation</li>
+        <li>Run <code>scripts/validate_bybit_live_api.py</code> before first live trade</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- MONEY -->
+  <div id="money" class="section">
+    <div class="sec-h"><div class="sec-icon">💰</div><div><div class="sec-title">Profit Path — Categories & Monetization</div><div class="sec-sub">Future trends, alternatives, who makes money, how you can</div></div></div>
+
+    <div class="grid-2" style="margin-bottom:1rem">
+      <div class="card card-green">
+        <h3>🔭 Future Trend: AI-Native Strategy Generation</h3>
+        <p>Your codebase already has the OpenRouter multi-model setup. The next evolution (2026–2027) is using Claude to dynamically generate new gold strategies based on daily market context reports — not just validate existing signals. Your <code>agent_commander.py</code> is already architected for this; it just needs the strategy generation prompt.</p>
+      </div>
+      <div class="card card-purple">
+        <h3>🔀 Alternative: Add Micro Gold (MGC) via IBKR</h3>
+        <p>Your system is Bybit-only. For regulated CME exposure, you could add <code>ib_async</code> as a second exchange connector alongside your Bybit client. Your <code>app/exchange/</code> layer has <code>base_exchange.py</code> and <code>exchange_router.py</code> — adding CME/IBKR is a new connector file, not an architecture change.</p>
+      </div>
+    </div>
+
+    <div class="card card-amber" style="margin-bottom:1rem">
+      <h3>🏆 Who Makes Money With Systems Like Yours</h3>
+      <ul>
+        <li><strong>Signal sellers:</strong> Traders with validated gold bots publish TradingView Pine Script strategies ($100–$300/month/subscriber). With 50 verified live trades showing profitability, you can publish.</li>
+        <li style="margin-top:0.4rem"><strong>PAMM managers:</strong> With 3–6 months of live track record, attract investor capital. 20–30% performance fee on managed accounts. Your system already has multi-account infrastructure in <code>app/infra/hybrid_exchange_manager.py</code>.</li>
+        <li style="margin-top:0.4rem"><strong>Quant bot SaaS:</strong> Package your system (which is genuinely enterprise-grade) as a white-label product for trading firms. Your Docker + systemd deployment is already production-ready.</li>
+      </ul>
+    </div>
+
+    <div class="card card-blue">
+      <h3>💡 Your Specific Profit Path (Linked to Your Architecture)</h3>
+      <div class="step" style="margin-top:0.75rem">
+        <div class="step-dot">1</div>
+        <div><div class="step-title">Apply the 3 fixes above (2 weeks)</div><div class="step-desc">AI filter active + real pattern detection + live news guard. Cost: ~$5–15/month in Claude API calls at your spend cap settings.</div></div>
+      </div>
+      <div class="step">
+        <div class="step-dot">2</div>
+        <div><div class="step-title">Paper trade → demo → live with 0.5% risk per trade</div><div class="step-desc">Use your existing <code>BYBIT_DEMO_TRADING_CONFIGURATION.md</code> flow. You have 25+ validation scripts already. Run them.</div></div>
+      </div>
+      <div class="step">
+        <div class="step-dot">3</div>
+        <div><div class="step-title">Export 50 live trades → publish TradingView signal</div><div class="step-desc">Your Postgres trade journal + Telegram notifications = automatic performance tracking. Export to TradingView pine results format.</div></div>
+      </div>
+      <div class="step">
+        <div class="step-dot">4</div>
+        <div><div class="step-title">Attract PAMM investors using your live track record</div><div class="step-desc">Your system already has multi-exchange infra (<code>hybrid_exchange_manager.py</code>) for managing multiple accounts. This is the highest-leverage income path.</div></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QUESTIONS -->
+  <div id="questions" class="section">
+    <div class="sec-h"><div class="sec-icon">❓</div><div><div class="sec-title">3 Key Questions for Your Next Steps</div><div class="sec-sub">Click to explore in depth</div></div></div>
+
+    <div class="q-card" onclick="sendPrompt('Innovative: My auto-trade system has an AI orchestrator with OpenRouter and an AI filter that is currently disabled (self.router = None). How can I architect a reinforcement learning loop where the AI filter learns from live trade outcomes stored in my Postgres database to continuously improve its signal validation confidence thresholds for XAUUSDT?')">
+      <div class="q-type">💡 Innovative</div>
+      <div class="q-text">How can I build a reinforcement learning loop where the AI filter learns from live XAUUSDT trade outcomes stored in my Postgres journal to automatically improve its confidence thresholds over time?</div>
+    </div>
+
+    <div class="q-card" onclick="sendPrompt('Real-world usage: Walk me through exactly what happens in my auto-trade-system from a TradingView webhook signal arriving, through the AI filter validation in ai_filter.py, to execution on Bybit via bybit_client.py, including all the risk checks in risk_engine.py — for a XAUUSDT long position during the London open session.')">
+      <div class="q-type">🏭 Real-World Usage</div>
+      <div class="q-text">Walk me through the exact execution flow in my system — from TradingView webhook → AI filter → Bybit execution — for a XAUUSDT long during London session, including all risk engine checkpoints.</div>
+    </div>
+
+    <div class="q-card" onclick="sendPrompt('My auto-trade system already has gold_opening_reversal.py with session-based trading (London 07:50-10:30 UTC, NY 13:20-16:30 UTC) and dynamic ATR sizing. What specific additional technical indicators and pattern detection logic should I add to detect high-probability reversal setups at these session opens for XAUUSDT perpetual swaps on Bybit, with code examples?')">
+      <div class="q-type">🎯 Specific to Your Code</div>
+      <div class="q-text">What additional indicators and patterns should I add to my <code>gold_opening_reversal.py</code> to detect high-probability reversals at London and NY session opens for XAUUSDT on Bybit?</div>
+    </div>
+
+    <div class="card card-green" style="margin-top:1.5rem">
+      <h3>🧠 How Claude analyzed your codebase</h3>
+      <p>After reading your zip, I identified the actual gap between what's built and what's needed. Your infrastructure is genuinely enterprise-grade — Prometheus metrics, self-healing watchdogs, three-tier LLM caching, circuit breakers, full test suites. The system is not missing infrastructure; it's missing three targeted logic completions: (1) <code>detect_reversal_pattern()</code> is a stub, (2) the AI filter's router is <code>None</code> despite Anthropic credentials existing in config, and (3) the news calendar is empty despite <code>NewsGuard</code> being fully built. These three fixes — estimated 12–15 hours total — are what separates your system from producing real profitable signals on XAUUSDT. This connects directly to the gold futures AI framework discussed in the previous conversation: your system is already at Phase 3 of that roadmap, just needing the final activations.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+function show(id) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>

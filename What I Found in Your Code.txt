@@ -1,0 +1,12 @@
+What I Found in Your Code
+Your system is already production-grade — 704 files, enterprise infrastructure (Redis, Postgres, Prometheus, self-healing watchdogs, full CI test suite). The architecture is solid. But there are 3 critical activations blocking profitable gold trading, all found by reading the actual source:
+Gap 1 — app/strategies/gold_opening_reversal.py line 212: The entire signal engine contains a comment: "TODO: Implement actual pattern detection logic". It only checks RSI <30 / >70. Every signal is close to a coin flip.
+Gap 2 — app/strategy/ai_filter/ai_filter.py line 22: self.router = None — your AI validation layer is fully built, the prompt template exists, your ANTHROPIC_API_KEY is in config.py, but the filter is permanently bypassed. Three lines of code activate it.
+Gap 3 — app/runtime/news_guard.py load_upcoming_events(): The NewsGuard is fully architected with CPI/FOMC/NFP event types built in — but the method is a stub with no API call. Your calendar is always empty, so you're trading blind into major gold-moving events.
+
+The Fix Priority (linked to your previous roadmap)
+This connects to your 4-phase trading system build — you're already at Phase 3, just needing these activations:
+Week 1 (~8h total): Activate the AI filter with a direct Anthropic call, replace the RSI stub with real pin bar + EMA + volume confluence detection, add VWAP and DXY correlation to indicators.py.
+Week 2 (~4h total): Wire NewsGuard to Finnhub's free economic calendar API, schedule a daily refresh task in main.py (which already has the news_guard instance at line 145).
+Week 3: Paper trade 5 days → demo validate → go live with 0.5% risk per trade. Your 25+ validation scripts (scripts/validate_bybit_live_api.py, scripts/validate_complete_cycle.py, etc.) do all the pre-flight checks automatically.
+The code changes are small. The infrastructure work is already done.
