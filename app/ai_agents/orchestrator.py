@@ -180,32 +180,57 @@ class AIAgentOrchestrator:
         Assess risk for proposed position.
         
         Uses OpenRouter LLM if available, otherwise falls back to heuristic.
+        Dynamically calculates max_position_size based on account balance and risk limits.
         
         Args:
             position: Strategy/proposal details
             market_data: Optional market context for better assessment
         """
+        # Import settings for risk parameters
+        from app.config import settings
+        
+        # Calculate dynamic position size based on account balance
+        # For paper trading, use demo account balance (default $100 if not available)
+        account_balance = await self._get_account_balance()
+        
+        # Get risk parameters from config
+        risk_per_trade = getattr(settings, 'GOLD_RISK_PER_TRADE', 0.005)  # 0.5% default
+        max_position_size_pct = getattr(settings, 'RISK_MAX_POSITION_SIZE_PCT', 0.015)  # 1.5% default
+        max_leverage = getattr(settings, 'GOLD_MAX_LEVERAGE', 3)
+        
+        # Calculate maximum position value (notional)
+        # Formula: balance × max_position_size_pct
+        max_position_value = account_balance * max_position_size_pct
+        
+        logger.info(f"💰 Risk Assessment - Balance: ${account_balance:.2f}, Max Position: ${max_position_value:.2f} ({max_position_size_pct:.1%})")
+        
         if self.use_openrouter and self.llm_client and market_data:
             try:
                 # Use OpenRouter for intelligent risk assessment
                 risk = await self.llm_client.assess_risk(position, market_data)
+                
+                # Override LLM's position size with our calculated limit
                 return {
                     "risk_level": risk.get('risk_level', 'medium'),
-                    "max_position_size": risk.get('max_position_size', 1000),
+                    "max_position_size": max_position_value,  # Use dynamic calculation
                     "stop_loss": risk.get('stop_loss', 0.02),
-                    "leverage_recommendation": risk.get('leverage_recommendation', 2)
+                    "leverage_recommendation": min(
+                        risk.get('leverage_recommendation', 2),
+                        max_leverage
+                    )
                 }
             except Exception as e:
                 logger.warning(f"⚠️  OpenRouter risk assessment failed, using fallback: {e}")
         
-        # Fallback to heuristic logic
+        # Fallback to heuristic logic with dynamic position sizing
         await asyncio.sleep(0.08)  # Simulate API delay in heuristic mode
         
-        # Conservative default risk assessment
+        # Conservative default risk assessment with dynamic position size
         return {
             "risk_level": "medium",
-            "max_position_size": 1000,
-            "stop_loss": 0.02
+            "max_position_size": max_position_value,  # Dynamic based on balance
+            "stop_loss": 0.02,
+            "leverage_recommendation": 2
         }
     
     async def run_cycle_parallel(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -508,9 +533,14 @@ class AIAgentOrchestrator:
         if strategy_name == 'no_trade':
             return None
         
-        # Determine position size based on risk and confidence
-        max_position = risk.get('max_position_size', 1000)
-        position_size = max_position * confidence
+        # Determine position size based on risk assessment
+        # max_position_size from risk assessment is the MAXIMUM notional value (including leverage)
+        max_notional_value = risk.get('max_position_size', 1.50)  # Default to safe value
+        
+        # Get confidence from strategy
+        confidence = strategy.get('confidence', 0.5)
+        
+        logger.info(f"📏 Position Sizing - Max Notional: ${max_notional_value:.2f}, Confidence: {confidence:.2f}")
         
         # Calculate stop-loss (ATR-based or percentage-based)
         atr_value = market_data.get('atr', None)  # Average True Range
@@ -588,11 +618,18 @@ class AIAgentOrchestrator:
         if leverage == 0:
             return None
         
+        # Calculate quantity to ensure position value stays within limits
+        # Formula: quantity = (max_notional × confidence) / (entry_price × leverage)
+        # This ensures: entry_price × quantity × leverage = max_notional × confidence ≤ max_notional
+        quantity = (max_notional_value * min(confidence, 1.0)) / (current_price * leverage)
+        
+        logger.info(f"📊 Final Position - Entry: ${current_price:.2f}, Qty: {quantity:.6f}, Leverage: {leverage}x, Notional: ${current_price * quantity * leverage:.2f}")
+        
         return {
             "symbol": market_data.get('symbol', 'BTC/USDT'),
             "side": side,
             "entry_price": current_price,
-            "quantity": position_size / current_price,
+            "quantity": quantity,
             "leverage": leverage,
             "stop_loss": round(stop_loss_price, 2),
             "take_profit": round(take_profit_price, 2),
@@ -670,6 +707,37 @@ class AIAgentOrchestrator:
         
         # Flush to ensure IDs are generated
         await db_session.flush()
+    
+    async def _get_account_balance(self) -> float:
+        """
+        Fetch current account balance from exchange.
+        
+        Returns:
+            Account balance in USD/USDT (defaults to $100 for paper trading if unavailable)
+        """
+        try:
+            from app.infra.exchange_manager import UnifiedExchangeManager
+            from app.config import settings
+            
+            # Initialize exchange manager for Bybit Demo
+            exchange_manager = UnifiedExchangeManager(
+                exchange_name="bybit",
+                use_testnet=False  # Demo trading doesn't use testnet flag
+            )
+            
+            # Fetch balance
+            balance_info = await exchange_manager.fetch_balance()
+            await exchange_manager.close()
+            
+            # Extract USDT balance
+            usdt_balance = balance_info.get('total_usdt', 100.0)
+            
+            logger.info(f"💳 Account balance fetched: ${usdt_balance:.2f}")
+            return usdt_balance
+            
+        except Exception as e:
+            logger.warning(f"⚠️  Could not fetch account balance: {e}. Using default $100.00")
+            return 100.0  # Default for paper trading demo
     
     def _detect_trading_session(self) -> Dict[str, Any]:
         """
