@@ -35,6 +35,13 @@ except ImportError:
     RESILIENCE_PLATFORM_AVAILABLE = False
     logger.warning("⚠️ Resilience platform not available - using legacy mode")
 
+try:
+    from app.notifications.alert_manager import get_alert_manager, AlertLevel, AlertUrgency
+    ALERT_MANAGER_AVAILABLE = True
+except ImportError:
+    ALERT_MANAGER_AVAILABLE = False
+    logger.warning("⚠️ AlertManager not available - Telegram alerts disabled")
+
 
 class APIWatchdog:
     """
@@ -222,15 +229,26 @@ class APIWatchdog:
     async def trigger_emergency_stop(self):
         """
         Emit emergency failure event for immediate action.
-        
-        REFACTORED: Instead of directly triggering emergency stop, we emit
-        a CRITICAL FailureEvent to ResilienceManager which coordinates response.
         """
         logger.critical(
             f"🚨 CONSECUTIVE API FAILURES: {self.consecutive_failures} failures detected"
         )
-        
-        # Emit critical failure event to ResilienceManager
+
+        if ALERT_MANAGER_AVAILABLE:
+            try:
+                await get_alert_manager().send_alert(
+                    level=AlertLevel.EMERGENCY,
+                    title="API Emergency Stop Triggered",
+                    message=(
+                        f"Exchange API unresponsive after {self.consecutive_failures} "
+                        f"consecutive failures.\nTrading halted — immediate investigation required."
+                    ),
+                    alert_type="api_emergency_stop",
+                    urgency=AlertUrgency.IMMEDIATE,
+                )
+            except Exception as e:
+                logger.error("Failed to send emergency alert: %s", e)
+
         if self.resilience_manager and RESILIENCE_PLATFORM_AVAILABLE:
             await self.resilience_manager.handle_failure(
                 FailureEvent(
@@ -245,7 +263,6 @@ class APIWatchdog:
                 )
             )
         else:
-            # Legacy fallback (TODO: remove after full migration)
             logger.critical("🚨 Emergency stop requested (legacy path - no ResilienceManager)")
     
     async def run_periodic_checks(self):
@@ -395,18 +412,20 @@ class DatabaseWatchdog:
         return {'raw_status': pool_status}
     
     async def alert_db_failure(self, error: Exception):
-        """
-        Alert operators of database failure.
-        
-        Actions:
-        - Log critical error
-        - Send Telegram alert
-        - Trigger recovery attempt
-        """
+        """Alert operators of database failure via Telegram."""
         logger.critical(f"🚨 DATABASE FAILURE DETECTED: {error}")
-        
-        # TODO: Send Telegram alert
-        # TODO: Trigger RecoveryAgent for DB reconnection
+
+        if ALERT_MANAGER_AVAILABLE:
+            try:
+                await get_alert_manager().send_alert(
+                    level=AlertLevel.CRITICAL,
+                    title="Database Failure Detected",
+                    message=f"DB connectivity check failed: {error}",
+                    alert_type="db_failure",
+                    urgency=AlertUrgency.HIGH,
+                )
+            except Exception as e:
+                logger.error("Failed to send DB failure alert: %s", e)
     
     async def run_periodic_checks(self):
         """Run periodic database health checks in background."""
@@ -563,21 +582,27 @@ class MemoryWatchdog:
         )
     
     async def trigger_critical_alert(self, memory_mb: float):
-        """
-        Trigger critical alert for excessive memory usage.
-        
-        Actions:
-        - Log critical error
-        - Send urgent Telegram alert
-        - Consider restarting worker processes
-        """
+        """Trigger critical alert for excessive memory usage via Telegram."""
         logger.critical(
             f"🚨 CRITICAL MEMORY ALERT: {memory_mb:.0f}MB usage detected. "
             f"Consider restarting application."
         )
-        
-        # TODO: Send urgent Telegram alert
-        # TODO: Consider graceful restart
+
+        if ALERT_MANAGER_AVAILABLE:
+            try:
+                await get_alert_manager().send_alert(
+                    level=AlertLevel.CRITICAL,
+                    title="Critical Memory Usage",
+                    message=(
+                        f"Memory at {memory_mb:.0f}MB "
+                        f"(threshold: {self.memory_critical_threshold_mb:.0f}MB).\n"
+                        f"Consider restarting the application."
+                    ),
+                    alert_type="memory_critical",
+                    urgency=AlertUrgency.HIGH,
+                )
+            except Exception as e:
+                logger.error("Failed to send memory alert: %s", e)
     
     async def run_periodic_checks(self):
         """Run periodic memory checks in background."""
@@ -618,20 +643,14 @@ class QueueWatchdog:
         self,
         max_task_age_sec: int = 300,
         max_queue_depth: int = 100,
-        check_interval_sec: int = 60
+        check_interval_sec: int = 60,
+        resilience_manager=None
     ):
-        """
-        Initialize queue watchdog.
-        
-        Args:
-            max_task_age_sec: Alert if oldest task exceeds this age
-            max_queue_depth: Alert if queue depth exceeds this
-            check_interval_sec: How often to check queue health
-        """
         self.max_task_age_sec = max_task_age_sec
         self.max_queue_depth = max_queue_depth
         self.check_interval_sec = check_interval_sec
-        
+        self.resilience_manager = resilience_manager
+
         # State tracking
         self.is_running = False
         self.last_check_time = None
@@ -686,18 +705,27 @@ class QueueWatchdog:
         self.last_task_processed_time = datetime.utcnow()
     
     async def trigger_worker_restart(self):
-        """
-        Emit failure event for worker restart.
-        
-        REFACTORED: Instead of directly restarting workers, emit a FailureEvent
-        to ResilienceManager which coordinates the response.
-        """
+        """Emit failure event for worker restart and send Telegram alert."""
         logger.critical(
             f"🚨 QUEUE FROZEN: No tasks processed in "
             f"{self.frozen_worker_alerts} consecutive checks"
         )
-        
-        # Emit critical failure event to ResilienceManager
+
+        if ALERT_MANAGER_AVAILABLE:
+            try:
+                await get_alert_manager().send_alert(
+                    level=AlertLevel.CRITICAL,
+                    title="Task Queue Frozen",
+                    message=(
+                        f"No tasks processed for >{self.max_task_age_sec}s.\n"
+                        f"Frozen checks: {self.frozen_worker_alerts}"
+                    ),
+                    alert_type="queue_frozen",
+                    urgency=AlertUrgency.HIGH,
+                )
+            except Exception as e:
+                logger.error("Failed to send queue frozen alert: %s", e)
+
         if self.resilience_manager and RESILIENCE_PLATFORM_AVAILABLE:
             await self.resilience_manager.handle_failure(
                 FailureEvent(
@@ -705,13 +733,10 @@ class QueueWatchdog:
                     failure_type="worker_frozen",
                     severity=FailureSeverity.CRITICAL,
                     domain=FailureDomain.EXECUTION,
-                    metadata={
-                        "frozen_checks": self.frozen_worker_alerts
-                    }
+                    metadata={"frozen_checks": self.frozen_worker_alerts}
                 )
             )
         else:
-            # Legacy fallback
             logger.critical("🚨 Worker restart requested (legacy path)")
     
     async def run_periodic_checks(self):
@@ -791,7 +816,7 @@ class WatchdogOrchestrator:
         
         self.queue_watchdog = QueueWatchdog(
             check_interval_sec=queue_check_interval,
-            resilience_manager=resilience_manager  # NEW
+            resilience_manager=resilience_manager
         )
         
         # Background tasks

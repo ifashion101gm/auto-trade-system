@@ -18,6 +18,8 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from datetime import timezone
+
 from app.infra.exchange_manager import UnifiedExchangeManager
 from app.risk.risk_engine import RiskEngine
 from app.risk.validator import TradeValidator
@@ -30,6 +32,8 @@ from app.infra.circuit_breaker import SystemCircuitBreaker
 from app.config import settings
 from app.risk.leverage_manager import LeverageManager
 from app.infra.kill_switch import KillSwitch
+from app.runtime.news_guard import NewsGuard
+from app.analytics.ai_edge_tracker import AIEdgeTracker
 
 logger = get_logger(__name__)
 
@@ -48,6 +52,7 @@ class ExecutionRequest:
     confidence: Optional[float] = None
     user_id: str = "default_user"
     execution_mode: str = "fully-auto"  # proposal, semi-auto, fully-auto
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -131,10 +136,16 @@ class ExecutionService:
         self.validator = TradeValidator()
         
         
-        # NEW: Circuit breaker for system-wide health monitoring
+        # Circuit breaker for system-wide health monitoring
         self.circuit_breaker = SystemCircuitBreaker(notifier=self.notifier)
         logger.info("✅ Circuit Breaker integrated into ExecutionService")
-        
+
+        # News guard for liquidity state computation
+        self.news_guard = NewsGuard()
+
+        # AI edge tracker (session injected per-request)
+        self.ai_edge_tracker = AIEdgeTracker()
+
         logger.info(f"✅ Execution Service initialized ({exchange_name.upper()} {'TESTNET' if use_testnet else 'LIVE'})")
     
     async def execute_trade(
@@ -185,6 +196,12 @@ class ExecutionService:
                 return validation_result
             
             # STEP 2: Run risk engine checks
+            # Inject liquidity_state into request metadata for AI filter
+            request.metadata = getattr(request, 'metadata', {})
+            request.metadata['liquidity_state'] = self.news_guard.compute_liquidity_state(
+                datetime.now(timezone.utc)
+            )
+
             risk_result = await self._check_risk(request, db_session)
             if not risk_result.success:
                 return risk_result

@@ -6,11 +6,13 @@ and CCXT library for unified API access with other modes.
 IMPORTANT: CCXT has known issues with Bybit Demo Trading (GitHub #25545)
 Pybit is the official Bybit SDK with full demo trading support.
 """
+import asyncio
 import logging
+import random
 import time
 
 import ccxt.async_support as ccxt
-from typing import Dict, Any, Optional, List
+from typing import Callable, Dict, Any, Optional, List
 from app.config import settings
 from app.logging_config import get_logger
 
@@ -157,6 +159,45 @@ class BybitClient:
         """Close exchange connection."""
         if hasattr(self, 'exchange') and self.exchange:
             await self.exchange.close()
+
+    # ── Retry helpers (Phase 2) ───────────────────────────────────────────────
+
+    @staticmethod
+    def is_transient_error(error: Exception) -> bool:
+        """Return True if error is retryable (network/rate-limit/5xx)."""
+        msg = str(error).lower()
+        permanent_codes = ('10001', '10002', '10003', '10004', '10005', '10024')
+        if any(code in msg for code in permanent_codes):
+            return False
+        transient_indicators = ('timeout', 'connection', '10006', '502', '503', '504')
+        return any(t in msg for t in transient_indicators) or True  # default retry
+
+    async def fetch_with_retry(
+        self,
+        operation: Callable,
+        operation_name: str = "operation",
+        max_retries: int = 3,
+        base_delay: float = 1.0,
+        max_delay: float = 30.0,
+    ) -> Any:
+        """Execute operation with exponential backoff + jitter on transient errors."""
+        last_error: Exception = Exception("No attempts made")
+        for attempt in range(max_retries):
+            try:
+                return await operation()
+            except Exception as exc:
+                last_error = exc
+                if not self.is_transient_error(exc):
+                    logger.error("Non-retryable error in %s: %s", operation_name, exc)
+                    raise
+                delay = min(base_delay * (2 ** attempt) + random.uniform(0, 1), max_delay)
+                logger.warning(
+                    "Transient error in %s (attempt %d/%d), retrying in %.1fs: %s",
+                    operation_name, attempt + 1, max_retries, delay, exc,
+                )
+                await asyncio.sleep(delay)
+        logger.error("%s failed after %d retries", operation_name, max_retries)
+        raise last_error
     
     async def _convert_symbol_to_bybit_format(self, symbol: str, category: str = "linear") -> str:
         """
@@ -741,16 +782,25 @@ class BybitClient:
             if self.use_pybit:
                 # Convert symbol format using standardized method
                 bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
-                
+
+                # CRITICAL: Check position mode before placing order (Phase 1)
+                position_info = await self.check_position_mode(symbol)
+                position_idx = position_info['position_idx']
+                logger.debug("Position mode for %s: %s (positionIdx=%d)", symbol, position_info['mode'], position_idx)
+
                 # Pybit place_order returns synchronous response
-                response = self.pybit_session.place_order(
-                    category="linear",
-                    symbol=bybit_symbol,
-                    side="Buy" if side.lower() == "buy" else "Sell",
-                    orderType="Market",
-                    qty=str(amount),
-                    leverage=leverage  # Include leverage per V5 API spec
-                )
+                async def _place():
+                    return self.pybit_session.place_order(
+                        category="linear",
+                        symbol=bybit_symbol,
+                        side="Buy" if side.lower() == "buy" else "Sell",
+                        orderType="Market",
+                        qty=str(amount),
+                        positionIdx=position_idx,
+                        leverage=leverage,
+                    )
+
+                response = await self.fetch_with_retry(_place, f"place_market_order({symbol})", max_retries=2, base_delay=2.0)
                 self._handle_pybit_error(response, "place_order")
                 
                 result = response.get('result', {})
@@ -905,18 +955,25 @@ class BybitClient:
             if self.use_pybit:
                 # Convert symbol format using standardized method
                 bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
-                
-                # Pybit place_order returns synchronous response
-                response = self.pybit_session.place_order(
-                    category="linear",
-                    symbol=bybit_symbol,
-                    side="Buy" if side.lower() == "buy" else "Sell",
-                    orderType="Limit",
-                    qty=str(amount),
-                    price=str(price),
-                    timeInForce=time_in_force,  # Required by V5 API
-                    leverage=leverage
-                )
+
+                # CRITICAL: Check position mode before placing order (Phase 1)
+                position_info = await self.check_position_mode(symbol)
+                position_idx = position_info['position_idx']
+
+                async def _place_limit():
+                    return self.pybit_session.place_order(
+                        category="linear",
+                        symbol=bybit_symbol,
+                        side="Buy" if side.lower() == "buy" else "Sell",
+                        orderType="Limit",
+                        qty=str(amount),
+                        price=str(price),
+                        timeInForce=time_in_force,
+                        positionIdx=position_idx,
+                        leverage=leverage,
+                    )
+
+                response = await self.fetch_with_retry(_place_limit, f"place_limit_order({symbol})", max_retries=2, base_delay=2.0)
                 self._handle_pybit_error(response, "place_order")
                 
                 result = response.get('result', {})
