@@ -189,6 +189,15 @@ class NewsGuard:
         
         logger.debug(f"Cleared past events, {len(self.events)} remaining")
     
+    def compute_liquidity_state(self, current_time_utc: datetime) -> str:
+        """Determine gold liquidity regime based on UTC hour."""
+        hour = current_time_utc.hour
+        if hour in range(0, 8) or hour in (12, 13) or hour in (20, 21, 22):
+            return "thin"
+        if hour in (8, 9, 10) or hour in (14, 15, 16):
+            return "heavy"
+        return "normal"
+
     def load_upcoming_events(self):
         """
         Load upcoming high-impact events from external source.
