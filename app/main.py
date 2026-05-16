@@ -679,6 +679,14 @@ try:
 except ImportError as e:
     logger.warning(f"Resilience API not available: {e}")
 
+# Control Panel Dashboard
+try:
+    from app.dashboard.control_panel import router as control_panel_router
+    app.include_router(control_panel_router)
+    logger.info("✅ Control panel dashboard registered at /dashboard")
+except ImportError as e:
+    logger.warning(f"Control panel not available: {e}")
+
 # ============================================================================
 # ADMIN ROUTES
 # ============================================================================
