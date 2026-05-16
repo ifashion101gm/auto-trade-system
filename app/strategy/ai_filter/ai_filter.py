@@ -11,6 +11,7 @@ Architecture: Signal → Risk Validation → AI Filter → Execution Gate
 import asyncio
 import json
 import math
+import re
 from enum import Enum
 from typing import Dict, Any, Optional
 
@@ -20,6 +21,14 @@ from app.strategy.signal_proposal import SignalProposal
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
+
+# In-process counters (reset on restart; use AIEdgeTracker for persistence)
+_parse_error_count: int = 0
+_timeout_count: int = 0
+_call_count: int = 0
+
+_SCHEMA_RE = re.compile(r'\{[^{}]*"regime"[^{}]*\}', re.DOTALL)
+_VALID_REGIMES = {"supportive", "neutral", "hostile", "avoid"}
 
 
 class Regime(str, Enum):
@@ -159,20 +168,33 @@ class AIFilter:
         multiplier = REGIME_MULTIPLIERS[Regime.NEUTRAL]
 
         if self._available:
+            global _parse_error_count, _timeout_count, _call_count
+            _call_count += 1
+            raw: Optional[str] = None
             try:
                 raw = await asyncio.wait_for(
                     self._call_openrouter_regime(signal, market_context),
                     timeout=AI_TIMEOUT_SECONDS,
                 )
-                data       = json.loads(raw)
-                regime     = Regime(data.get("regime", "neutral"))
+                parsed = self._parse_regime_response(raw)
+                if parsed is None:
+                    raise ValueError(f"schema validation failed; raw={raw!r}")
+                regime     = Regime(parsed["regime"])
                 multiplier = REGIME_MULTIPLIERS.get(regime, 1.0)
                 logger.info("AI regime: %s (multiplier=%.2f)", regime.value, multiplier)
 
             except asyncio.TimeoutError:
-                logger.warning("AI timeout (>%.1fs); falling back to neutral", AI_TIMEOUT_SECONDS)
+                _timeout_count += 1
+                logger.warning(
+                    "AI timeout (>%.1fs); falling back to neutral [timeouts=%d/%d]",
+                    AI_TIMEOUT_SECONDS, _timeout_count, _call_count,
+                )
             except (json.JSONDecodeError, ValueError, KeyError) as e:
-                logger.error("AI parse error: %s; falling back to neutral", e)
+                _parse_error_count += 1
+                logger.error(
+                    "AI parse error: %s; raw=%r [parse_errors=%d/%d]",
+                    e, raw, _parse_error_count, _call_count,
+                )
         else:
             logger.debug("AIFilter: no client — rule-based fallback")
             return self._rule_based_fallback(signal, market_context)
@@ -206,6 +228,46 @@ class AIFilter:
             base_confidence, signal.confidence, regime.value, decay,
         )
         return signal
+
+    # ── Response parser ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_regime_response(raw: str) -> Optional[Dict[str, Any]]:
+        """
+        Defensive JSON parse with regex fallback.
+        1. Try json.loads on the full string.
+        2. If that fails, extract the first {...} block containing "regime" and retry.
+        3. Validate that regime is one of the 4 known values.
+        Returns None if all attempts fail.
+        """
+        def _validate(data: Dict) -> Optional[Dict]:
+            r = data.get("regime", "")
+            if r in _VALID_REGIMES:
+                return {"regime": r, "multiplier": float(data.get("multiplier", 1.0))}
+            return None
+
+        try:
+            return _validate(json.loads(raw))
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        # Regex extraction: find first {...} block containing "regime"
+        m = _SCHEMA_RE.search(raw or "")
+        if m:
+            try:
+                return _validate(json.loads(m.group()))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
+
+    @staticmethod
+    def get_counters() -> Dict[str, int]:
+        """Return live parse_error / timeout / call counters."""
+        return {
+            "parse_errors": _parse_error_count,
+            "timeouts": _timeout_count,
+            "calls": _call_count,
+        }
 
     # ── Rule-based fallback (no LLM available) ────────────────────────────────
 

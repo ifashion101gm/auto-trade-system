@@ -3,6 +3,25 @@
 **Current Status:** Phase 1 is 85% complete. AI Filter core logic is LIVE and working via OpenRouter.  
 **Next Action:** Wire up remaining pieces and validate before paper trading.
 
+## Live Observations (logs)
+
+- **AI parse errors:** ~20 occurrences observed today in logs (AI responses failed JSON parse and fell back to neutral). This increases the number of unadjusted signals and must be reduced.
+- **AI timeouts:** ~24 warnings observed today where the hard timeout triggered and the filter fell back to neutral. Timeouts are working as a safety net but frequency should be monitored.
+- **Evidence:** see `/workspaces/auto-trade-system/logs/all_2026-05-16.log` and `json_2026-05-16.log` entries for `AI parse error` and `AI timeout` messages.
+
+These are operational issues (robustness/latency) rather than correctness problems in the multiplier/decay logic.
+
+## Immediate Remediation (next 24h)
+
+- **Add defensive JSON parsing & schema validation** in `ai_filter.py:validate_signal()` — try `json.loads()`, then strict schema check; on parse failure attempt a small regex extraction for `{...}` before falling back. Log full model response for tuning.
+- **Enforce deterministic model settings**: set `temperature=0`, `max_tokens` low (e.g., 200), and lock system prompt version to reduce variability.
+- **Add retry/backoff for transient parse errors**: 1 fast retry with the same prompt + stricter instructions before falling back to neutral.
+- **Instrument counters & alerts**: increment `ai_parse_error_count` and `ai_timeout_count` in `ai_edge_tracker.py`; create alert if parse_errors >1% or timeouts >1% of AI calls in a 1h window.
+- **Cache system prompt** in-memory to reduce token and latency variance; enable OpenRouter/system prompt caching if available.
+- **Short-term monitoring**: run a 100-signal smoke test and produce a short report (parse_errors, timeouts, avg tokens, p95 latency).
+
+These steps should reduce parse failures and give reliable telemetry for the measurement phase.
+
 ---
 
 ## CRITICAL FINDING: Architecture Already Reordered ✅
@@ -33,6 +52,8 @@ Confirmed in `app/execution/agents/signal_agent.py`:
 | **News Guard** | `app/runtime/news_guard.py` | ✅ LIVE | Event types, activity window |
 | **Analytics Tracker** | `app/analytics/ai_edge_tracker.py` | ✅ LIVE | Logging structure |
 | **Rule-based Fallback** | `ai_filter.py:_rule_based_fallback()` | ✅ LIVE | When OpenRouter unavailable |
+
+**Caveat:** The filter's rule-based fallback and timeout are functioning, but the observed parse error and timeout rates indicate we need immediate hardening before paper trading.
 
 ---
 
