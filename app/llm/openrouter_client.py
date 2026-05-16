@@ -155,6 +155,35 @@ class OpenRouterClient:
                 raise Exception(f"OpenRouter API error: {response.status_code} - {response.text}")
             
             result = response.json()
+            
+            # Track token usage if available in response
+            try:
+                usage = result.get('usage', {})
+                if usage:
+                    prompt_tokens = usage.get('prompt_tokens', 0)
+                    completion_tokens = usage.get('completion_tokens', 0)
+                    total_tokens = usage.get('total_tokens', 0)
+                    
+                    # Update Prometheus metrics
+                    try:
+                        from app.main import LLM_TOKEN_USAGE_TOTAL
+                        if LLM_TOKEN_USAGE_TOTAL:
+                            # Extract provider and model name for labels
+                            provider = model.split('/')[0] if '/' in model else 'unknown'
+                            model_name = model.split('/')[-1] if '/' in model else model
+                            LLM_TOKEN_USAGE_TOTAL.labels(
+                                provider=provider,
+                                model=model_name
+                            ).inc(total_tokens)
+                            logger.debug(f"LLM token usage tracked: {total_tokens} tokens for {model}")
+                    except ImportError:
+                        pass  # Metrics not available
+                    
+                    # Update internal counters
+                    self.daily_token_count += total_tokens
+            except Exception as e:
+                logger.debug(f"Failed to track token usage: {e}")
+            
             return result
     
     async def classify_regime(self, system_prompt: str, user_prompt: str) -> str:

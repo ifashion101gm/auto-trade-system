@@ -27,6 +27,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Import Prometheus metrics from main module
+try:
+    from app.main import WEBSOCKET_UPTIME_SECONDS, WEBSOCKET_RECONNECT_TOTAL
+except ImportError:
+    # Fallback if metrics not available
+    WEBSOCKET_UPTIME_SECONDS = None
+    WEBSOCKET_RECONNECT_TOTAL = None
+
 
 def calculate_exponential_backoff(
     attempt: int,
@@ -198,6 +206,12 @@ class MEXCWebSocketManager:
                     'uptime_seconds': round(time.time() - self._connected_since, 2),
                     'subscriptions_restored': len(self.subscriptions)
                 })
+                
+                # Update Prometheus metrics
+                if WEBSOCKET_RECONNECT_TOTAL:
+                    WEBSOCKET_RECONNECT_TOTAL.labels(exchange="mexc").inc()
+                if WEBSOCKET_UPTIME_SECONDS:
+                    WEBSOCKET_UPTIME_SECONDS.labels(exchange="mexc").set(time.time() - self._connected_since)
                 
                 logger.info(f"✅ WebSocket ready with {len(self.subscriptions)} active subscriptions")
                 
@@ -500,6 +514,10 @@ class MEXCWebSocketManager:
         while self.running:
             try:
                 await asyncio.sleep(self.heartbeat_interval)
+                
+                # Update uptime metric
+                if WEBSOCKET_UPTIME_SECONDS and self._connected_since:
+                    WEBSOCKET_UPTIME_SECONDS.labels(exchange="mexc").set(time.time() - self._connected_since)
                 
                 # Check if we've received a message recently
                 if self.last_heartbeat and (time.time() - self.last_heartbeat) > self.heartbeat_timeout:

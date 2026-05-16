@@ -22,6 +22,14 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
+# Import Prometheus metrics from main module
+try:
+    from app.main import LLM_TOKEN_USAGE_TOTAL, AI_CONFIDENCE_SCORES
+except ImportError:
+    # Fallback if metrics not available
+    LLM_TOKEN_USAGE_TOTAL = None
+    AI_CONFIDENCE_SCORES = None
+
 # In-process counters (reset on restart; use AIEdgeTracker for persistence)
 _parse_error_count: int = 0
 _timeout_count: int = 0
@@ -222,6 +230,10 @@ class AIFilter:
         signal.metadata["multiplier"]  = multiplier
         signal.metadata["base_confidence"]    = base_confidence
         signal.metadata["consecutive_signals"] = consecutive
+
+        # Update Prometheus metrics
+        if AI_CONFIDENCE_SCORES:
+            AI_CONFIDENCE_SCORES.labels(agent_type="ai_filter").observe(adjusted)
 
         logger.info(
             "Signal validated: conf %.2f → %.2f (regime=%s decay=%.3f)",

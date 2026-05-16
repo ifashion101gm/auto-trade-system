@@ -231,6 +231,50 @@ ERRORS_TOTAL = Counter(
     registry=CUSTOM_REGISTRY,
 )
 
+# Infrastructure Health Metrics
+REDIS_CONNECTION_STATUS = Gauge(
+    "redis_connection_status",
+    "Redis connection status (1=connected, 0=disconnected)",
+    registry=CUSTOM_REGISTRY,
+)
+
+DATABASE_CONNECTION_POOL_SIZE = Gauge(
+    "database_connection_pool_size",
+    "Database connection pool size",
+    ["pool_type"],  # active/idle
+    registry=CUSTOM_REGISTRY,
+)
+
+WEBSOCKET_UPTIME_SECONDS = Gauge(
+    "websocket_uptime_seconds",
+    "WebSocket connection uptime in seconds",
+    ["exchange"],
+    registry=CUSTOM_REGISTRY,
+)
+
+WEBSOCKET_RECONNECT_TOTAL = Counter(
+    "websocket_reconnect_total",
+    "Total WebSocket reconnection attempts",
+    ["exchange"],
+    registry=CUSTOM_REGISTRY,
+)
+
+# AI/LLM Layer Metrics
+LLM_TOKEN_USAGE_TOTAL = Counter(
+    "llm_token_usage_total",
+    "Total LLM token usage",
+    ["provider", "model"],
+    registry=CUSTOM_REGISTRY,
+)
+
+AI_CONFIDENCE_SCORES = Histogram(
+    "ai_confidence_scores",
+    "AI confidence score distribution",
+    ["agent_type"],
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+    registry=CUSTOM_REGISTRY,
+)
+
 # Legacy metrics (for backward compatibility)
 REQUEST_COUNT, REQUEST_LATENCY, WEBSOCKET_CONNECTED, EVENT_BUS_QUEUE_SIZE = None, None, None, None
 
@@ -664,6 +708,60 @@ async def close_services():
     
     logger.info("👋 All services stopped")
 
+async def update_infrastructure_metrics():
+    """
+    Background task to periodically update infrastructure metrics.
+    Runs every 10 seconds to keep Prometheus metrics fresh.
+    """
+    import redis.asyncio as aioredis
+    from app.database.connection import engine, db_health_status
+    
+    while True:
+        try:
+            await asyncio.sleep(10)
+            
+            # Update Redis connection status
+            try:
+                r = aioredis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
+                await r.ping()
+                REDIS_CONNECTION_STATUS.set(1)
+                await r.close()
+            except Exception:
+                REDIS_CONNECTION_STATUS.set(0)
+            
+            # Update database connection pool metrics
+            try:
+                pool = engine.pool
+                if hasattr(pool, 'status'):
+                    # Get pool statistics
+                    pool_status = pool.status()
+                    # Parse pool status to extract active/idle counts
+                    # Format varies by SQLAlchemy version
+                    DATABASE_CONNECTION_POOL_SIZE.labels(pool_type="active").set(
+                        getattr(pool, '_checkedin', 0)
+                    )
+                    DATABASE_CONNECTION_POOL_SIZE.labels(pool_type="idle").set(
+                        getattr(pool, '_overflow', 0)
+                    )
+                else:
+                    # Fallback: set to 0 if we can't get stats
+                    DATABASE_CONNECTION_POOL_SIZE.labels(pool_type="active").set(0)
+                    DATABASE_CONNECTION_POOL_SIZE.labels(pool_type="idle").set(0)
+            except Exception:
+                DATABASE_CONNECTION_POOL_SIZE.labels(pool_type="active").set(0)
+                DATABASE_CONNECTION_POOL_SIZE.labels(pool_type="idle").set(0)
+            
+            # Note: WebSocket uptime and reconnects are updated by WebSocket managers
+            # when events occur (see websocket/manager.py and infra/websocket_manager.py)
+            
+            # Note: LLM token usage and AI confidence scores are updated by AI agents
+            # when they make predictions (see app/ai/ directory)
+            
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"Error updating infrastructure metrics: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
@@ -674,6 +772,10 @@ async def lifespan(app: FastAPI):
         await state.watchdog_orchestrator.start_all_watchdogs()
         logger.info("✅ Self-healing watchdogs started")
     
+    # Start infrastructure metrics updater
+    metrics_task = asyncio.create_task(update_infrastructure_metrics())
+    logger.info("✅ Infrastructure metrics updater started")
+    
     logger.info("🎉 Auto Trade System Enterprise fully operational!")
     logger.info(f"   Dashboard: http://localhost:8000/docs")
     logger.info(f"   Metrics: http://localhost:8000/metrics/prometheus")
@@ -681,6 +783,13 @@ async def lifespan(app: FastAPI):
     logger.info(f"   Admin: http://localhost:8000/admin/state (requires API key)")
     
     yield
+    
+    # Stop infrastructure metrics updater
+    metrics_task.cancel()
+    try:
+        await metrics_task
+    except asyncio.CancelledError:
+        pass
     
     # Phase 2: Stop self-healing watchdogs
     if state.watchdog_orchestrator:
