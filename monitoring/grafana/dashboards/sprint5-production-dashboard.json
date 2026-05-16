@@ -71,7 +71,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "pnl_per_trade_usd",
+          "expr": "pnl_cumulative_usd",
           "legendFormat": "P&L per Trade",
           "refId": "A"
         }
@@ -137,7 +137,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "win_rate_percentage",
+          "expr": "win_rate_percent",
           "legendFormat": "Win Rate",
           "refId": "A"
         }
@@ -205,7 +205,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "daily_drawdown_percentage",
+          "expr": "drawdown_current_percent",
           "legendFormat": "Drawdown",
           "refId": "A"
         }
@@ -284,7 +284,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "risk_current_exposure_usd",
+          "expr": "risk_exposure_usd",
           "legendFormat": "Exposure",
           "refId": "A"
         }
@@ -352,7 +352,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "daily_loss_limit_percentage",
+          "expr": "positions_open",
           "legendFormat": "Daily Loss",
           "refId": "A"
         }
@@ -432,7 +432,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "circuit_breaker_state",
+          "expr": "bot_trading_enabled",
           "legendFormat": "{{component}}",
           "refId": "A"
         }
@@ -532,7 +532,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, rate(trade_execution_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, rate(execution_latency_seconds_bucket[5m])) * 1000",
           "legendFormat": "p50",
           "refId": "A"
         },
@@ -541,7 +541,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, rate(trade_execution_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, rate(execution_latency_seconds_bucket[5m])) * 1000",
           "legendFormat": "p95",
           "refId": "B"
         },
@@ -550,7 +550,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, rate(trade_execution_latency_ms_bucket[5m]))",
+          "expr": "histogram_quantile(0.99, rate(execution_latency_seconds_bucket[5m])) * 1000",
           "legendFormat": "p99",
           "refId": "C"
         }
@@ -645,7 +645,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "trade_slippage_percentage",
+          "expr": "slippage_avg_percent",
           "legendFormat": "{{exchange}} {{symbol}}",
           "refId": "A"
         }

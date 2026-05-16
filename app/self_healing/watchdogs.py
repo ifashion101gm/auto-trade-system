@@ -810,8 +810,7 @@ class WatchdogOrchestrator:
         )
         
         self.memory_watchdog = MemoryWatchdog(
-            check_interval_sec=memory_check_interval,
-            resilience_manager=resilience_manager  # NEW
+            check_interval_sec=memory_check_interval
         )
         
         self.queue_watchdog = QueueWatchdog(

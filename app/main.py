@@ -98,6 +98,139 @@ BACKGROUND_TASKS = Gauge(
     registry=CUSTOM_REGISTRY,
 )
 
+# Trading Performance Metrics
+TRADES_TOTAL = Counter(
+    "trades_total",
+    "Total number of trades executed",
+    ["side", "symbol", "outcome"],  # side: long/short, outcome: win/loss/breakeven
+    registry=CUSTOM_REGISTRY,
+)
+
+TRADES_WINNING = Counter(
+    "trades_winning_total",
+    "Total number of winning trades",
+    ["side", "symbol"],
+    registry=CUSTOM_REGISTRY,
+)
+
+TRADES_LOSING = Counter(
+    "trades_losing_total",
+    "Total number of losing trades",
+    ["side", "symbol"],
+    registry=CUSTOM_REGISTRY,
+)
+
+PNL_CUMULATIVE = Gauge(
+    "pnl_cumulative_usd",
+    "Cumulative P&L in USD",
+    registry=CUSTOM_REGISTRY,
+)
+
+PNL_PER_TRADE = Histogram(
+    "pnl_per_trade_usd",
+    "P&L per trade distribution",
+    buckets=[-50, -20, -10, -5, -2, -1, 0, 1, 2, 5, 10, 20, 50, 100],
+    registry=CUSTOM_REGISTRY,
+)
+
+WIN_RATE = Gauge(
+    "win_rate_percent",
+    "Current win rate percentage",
+    registry=CUSTOM_REGISTRY,
+)
+
+SHARPE_RATIO = Gauge(
+    "sharpe_ratio",
+    "Sharpe ratio (rolling)",
+    registry=CUSTOM_REGISTRY,
+)
+
+# Risk Management Metrics
+RISK_EXPOSURE_USD = Gauge(
+    "risk_exposure_usd",
+    "Current risk exposure in USD",
+    registry=CUSTOM_REGISTRY,
+)
+
+DRAWDOWN_CURRENT = Gauge(
+    "drawdown_current_percent",
+    "Current drawdown percentage",
+    registry=CUSTOM_REGISTRY,
+)
+
+DRAWDOWN_MAX = Gauge(
+    "drawdown_max_percent",
+    "Maximum drawdown percentage",
+    registry=CUSTOM_REGISTRY,
+)
+
+CONSECUTIVE_LOSSES = Gauge(
+    "consecutive_losses",
+    "Current consecutive losing trades",
+    registry=CUSTOM_REGISTRY,
+)
+
+# Execution Metrics
+EXECUTION_LATENCY = Histogram(
+    "execution_latency_seconds",
+    "Order execution latency",
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0],
+    registry=CUSTOM_REGISTRY,
+)
+
+ORDERS_TOTAL = Counter(
+    "orders_total",
+    "Total number of orders placed",
+    ["order_type", "status"],  # market/limit, filled/rejected/cancelled
+    registry=CUSTOM_REGISTRY,
+)
+
+ORDERS_REJECTED = Counter(
+    "orders_rejected_total",
+    "Total number of rejected orders",
+    ["reason"],
+    registry=CUSTOM_REGISTRY,
+)
+
+SLIPPAGE_AVG = Gauge(
+    "slippage_avg_percent",
+    "Average slippage percentage",
+    registry=CUSTOM_REGISTRY,
+)
+
+# System Health Metrics
+POSITIONS_OPEN = Gauge(
+    "positions_open",
+    "Number of open positions",
+    registry=CUSTOM_REGISTRY,
+)
+
+BALANCE_TOTAL = Gauge(
+    "balance_total_usd",
+    "Total account balance in USD",
+    registry=CUSTOM_REGISTRY,
+)
+
+BALANCE_AVAILABLE = Gauge(
+    "balance_available_usd",
+    "Available balance in USD",
+    registry=CUSTOM_REGISTRY,
+)
+
+API_LATENCY = Histogram(
+    "api_latency_seconds",
+    "Exchange API call latency",
+    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0],
+    registry=CUSTOM_REGISTRY,
+)
+
+ERRORS_TOTAL = Counter(
+    "errors_total",
+    "Total number of errors",
+    ["error_type", "severity"],  # connection/execution/risk, warning/critical
+    registry=CUSTOM_REGISTRY,
+)
+
 # Legacy metrics (for backward compatibility)
 REQUEST_COUNT, REQUEST_LATENCY, WEBSOCKET_CONNECTED, EVENT_BUS_QUEUE_SIZE = None, None, None, None
 
