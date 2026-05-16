@@ -56,7 +56,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(http_requests_total[5m])",
+          "expr": "sum(rate(http_requests_total[15m]))",
           "legendFormat": "Requests/sec",
           "refId": "A"
         }
@@ -116,7 +116,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[5m])) / sum(rate(http_requests_total[5m])) * 100",
+          "expr": "(sum(rate(http_requests_total{status=~\"5..\"}[15m])) / sum(rate(http_requests_total[15m]))) * 100 or vector(0)",
           "legendFormat": "Error Rate %",
           "refId": "A"
         }
@@ -203,7 +203,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[15m]))",
           "legendFormat": "95th percentile",
           "refId": "A"
         },
@@ -212,7 +212,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket[5m]))",
+          "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket[15m]))",
           "legendFormat": "50th percentile",
           "refId": "B"
         }
