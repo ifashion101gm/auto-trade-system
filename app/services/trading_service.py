@@ -146,10 +146,17 @@ class TradingService:
     ) -> Optional[Dict[str, Any]]:
         """Generate trade proposal from market analysis."""
         # Integration point with strategy layer
-        # For now, use simple heuristic or call strategy manager
         from app.strategy.strategy_manager import StrategyManager
-        
-        manager = StrategyManager()
+        try:
+            from app.main import state as _app_state
+            _news_guard = getattr(_app_state, 'news_guard', None)
+            _session_scheduler = getattr(_app_state, 'session_scheduler', None)
+        except Exception:
+            _news_guard, _session_scheduler = None, None
+        manager = StrategyManager(
+            news_guard=_news_guard,
+            session_scheduler=_session_scheduler,
+        )
         signals = await manager.generate_signals(market_data)
         
         if not signals:

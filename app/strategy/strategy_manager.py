@@ -5,31 +5,39 @@ Responsibilities:
 - Load and initialize all available strategies
 - Run strategies in parallel on market data
 - Select highest-confidence signal
-- Apply AI filter validation
+- Apply AI filter validation (regime classifier)
 """
-from typing import Dict, Any, List, Optional
+import asyncio
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from app.analytics.ai_edge_tracker import AIEdgeTracker
+from app.logging_config import get_logger
+from app.strategy.ai_filter import AIFilter
 from app.strategy.base_strategy import BaseStrategy
-from app.strategy.signal_proposal import SignalProposal
 from app.strategy.breakout import BreakoutStrategy
 from app.strategy.mean_reversion import MeanReversionStrategy
+from app.strategy.signal_proposal import SignalProposal
 from app.strategy.trend import TrendStrategy
-from app.strategy.ai_filter import AIFilter
-from app.logging_config import get_logger
-import asyncio
 
 logger = get_logger(__name__)
 
+
 class StrategyManager:
     """Manages multiple trading strategies and signal selection."""
-    
-    def __init__(self, use_ai_filter: bool = True):
+
+    def __init__(self, use_ai_filter: bool = True, news_guard=None, session_scheduler=None):
         self.strategies: List[BaseStrategy] = [
             BreakoutStrategy(),
             MeanReversionStrategy(),
-            TrendStrategy()
+            TrendStrategy(),
         ]
         self.ai_filter = AIFilter() if use_ai_filter else None
-        logger.info(f"✅ Strategy Manager initialized with {len(self.strategies)} strategies")
+        self.edge_tracker = AIEdgeTracker() if use_ai_filter else None
+        # Optional runtime context providers (injected from app state)
+        self.news_guard = news_guard
+        self.session_scheduler = session_scheduler
+        logger.info("✅ Strategy Manager initialized with %d strategies", len(self.strategies))
     
     async def generate_signals(self, market_data: Dict[str, Any]) -> Optional[SignalProposal]:
         """
@@ -68,18 +76,15 @@ class StrategyManager:
             
             # Apply AI filter if enabled
             if self.ai_filter:
-                market_context = {
-                    'regime': market_data.get('regime', 'Normal'),
-                    'volatility': market_data.get('volatility', 0.5),
-                    'volume_trend': market_data.get('volume_trend', 'neutral')
-                }
-                
+                market_context = self._build_market_context(market_data)
+
                 filtered_signals = []
                 for signal in valid_signals:
                     validated = await self.ai_filter.validate_signal(signal, market_context)
                     if validated:
+                        self._track_signal(validated)
                         filtered_signals.append(validated)
-                
+
                 valid_signals = filtered_signals
             
             if not valid_signals:
@@ -98,6 +103,52 @@ class StrategyManager:
             logger.error(f"Strategy Manager error: {e}")
             return None
     
+    def _build_market_context(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Build enriched market context for AI regime classifier."""
+        now = datetime.now(timezone.utc)
+
+        # Liquidity state from NewsGuard (falls back to time-based heuristic)
+        if self.news_guard:
+            liquidity_state = self.news_guard.compute_liquidity_state(now)
+            news_events = 1 if not self.news_guard.is_trading_safe() else 0
+        else:
+            liquidity_state = market_data.get("liquidity_state", "normal")
+            news_events = market_data.get("news_events", 0)
+
+        # Session from SessionScheduler
+        if self.session_scheduler:
+            try:
+                session_info = self.session_scheduler.get_session_info()
+                session = session_info.get("current_session", "dead")
+            except Exception:
+                session = market_data.get("session", "dead")
+        else:
+            session = market_data.get("session", "dead")
+
+        return {
+            "session": session,
+            "dxy_trend": market_data.get("dxy_trend", "flat"),
+            "news_events": news_events,
+            "volume_state": market_data.get("volume_state", "normal"),
+            "liquidity_state": liquidity_state,
+            "volatility_regime": market_data.get("volatility_regime", "stable"),
+            # Legacy keys kept for rule-based fallback
+            "regime": market_data.get("regime", "Normal"),
+            "volatility": market_data.get("volatility", 0.5),
+            "volume_trend": market_data.get("volume_trend", "neutral"),
+        }
+
+    def _track_signal(self, signal: SignalProposal) -> None:
+        """Log validated signal to AIEdgeTracker."""
+        if not self.edge_tracker:
+            return
+        self.edge_tracker.log_signal_executed(
+            regime=signal.metadata.get("regime", "unknown"),
+            base_confidence=signal.metadata.get("base_confidence", signal.confidence),
+            adjusted_confidence=signal.confidence,
+            multiplier=signal.metadata.get("multiplier", 1.0),
+        )
+
     def get_strategy_info(self) -> List[Dict[str, Any]]:
         """Get information about all loaded strategies."""
         return [

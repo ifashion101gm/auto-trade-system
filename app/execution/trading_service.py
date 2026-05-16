@@ -27,6 +27,7 @@ from app.execution.states import ExecutionState, is_valid_transition
 from app.execution.state_validator import state_validator
 from app.events.event_bus import event_bus
 from app.execution.self_healing_engine import SelfHealingExecutionEngine
+from app.analytics.daily_ai_report import DailyAIReport
 
 logger = get_logger(__name__)
 
@@ -211,6 +212,7 @@ class LiveTradingService:
         )
         self.dedup_engine = self.self_healing_engine.dedup_engine
         self.anomaly_detector = self.self_healing_engine.anomaly_detector
+        self.daily_ai_report = DailyAIReport()
         
         logger.info("✅ Self-healing execution engine initialized (health gates + dedup + anomaly recovery)")
     
@@ -1217,7 +1219,16 @@ class LiveTradingService:
         trade.notes += f"\nClosed at: ${exit_price:,.2f}, P&L: ${profit:.2f} ({profit_pct:.2f}%)"
         
         await db_session.commit()
-        
+
+        # Log trade outcome to AI edge tracker
+        regime = trade.notes and next(
+            (w.split("regime=")[1].split()[0] for w in (trade.notes or "").split(",") if "regime=" in w),
+            "unknown",
+        )
+        self.daily_ai_report.record_trade_closed(
+            trade_id=str(trade_id), pnl=profit, regime=regime
+        )
+
         # Send Telegram notification
         await self.notifier.send_trade_exit({
             'symbol': trade.symbol,

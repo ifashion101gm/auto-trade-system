@@ -885,8 +885,18 @@ async def generate_signal_from_strategies(
     await enforce_trading_rate_limit(request)
     
     try:
-        # Initialize strategy manager
-        strategy_mgr = StrategyManager(use_ai_filter=True)
+        # Initialize strategy manager with runtime context providers
+        try:
+            from app.main import state as _app_state
+            _news_guard = getattr(_app_state, 'news_guard', None)
+            _session_scheduler = getattr(_app_state, 'session_scheduler', None)
+        except Exception:
+            _news_guard, _session_scheduler = None, None
+        strategy_mgr = StrategyManager(
+            use_ai_filter=True,
+            news_guard=_news_guard,
+            session_scheduler=_session_scheduler,
+        )
         
         # Generate signals
         signal = await strategy_mgr.generate_signals(market_data)
