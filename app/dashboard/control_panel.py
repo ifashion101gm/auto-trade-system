@@ -3,6 +3,7 @@ Control Panel Dashboard API
 Unified readiness checklist + live system status for Bybit live trade deployment.
 
 Endpoints:
+  GET  /dashboard/                     — Dashboard index with all available endpoints
   GET  /dashboard/readiness          — full live-trade readiness checklist
   GET  /dashboard/status             — real-time system snapshot
   GET  /dashboard/strategy           — strategy layer health
@@ -10,6 +11,7 @@ Endpoints:
   GET  /dashboard/exchange           — Bybit connectivity
   GET  /dashboard/ai                 — AI regime classifier health
   GET  /dashboard/safety             — kill switch + circuit breakers
+  GET  /dashboard/reconciliation     — reconciliation engine status
   POST /dashboard/checklist/run      — execute all checks and return pass/fail
 """
 import asyncio
@@ -26,6 +28,74 @@ from app.strategy.ai_filter.ai_filter import AIFilter
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dashboard Index Endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/")
+async def dashboard_index():
+    """
+    Dashboard index - lists all available dashboard endpoints.
+    
+    Provides a quick reference for navigating the dashboard API.
+    Returns categorized endpoint list with descriptions.
+    """
+    return {
+        "timestamp": _utc(),
+        "name": "Auto Trade System - Control Panel Dashboard",
+        "version": "3.0.0",
+        "endpoints": {
+            "readiness_assessment": {
+                "GET /dashboard/readiness": "Quick readiness score + verdict + critical failures",
+                "POST /dashboard/checklist/run": "Execute full live-trade readiness checklist"
+            },
+            "system_status": {
+                "GET /dashboard/status": "Real-time system snapshot (trading, session, risk, AI)",
+                "GET /dashboard/exchange": "Bybit connectivity, balance, ticker, spread",
+                "GET /dashboard/risk": "Risk engine state (locks, drawdown, consecutive losses)",
+                "GET /dashboard/ai": "AI regime classifier health (error rates, counters)",
+                "GET /dashboard/strategy": "Strategy layer health (pattern detection, session, indicators)",
+                "GET /dashboard/safety": "Kill switch + circuit breaker state",
+                "GET /dashboard/reconciliation": "Reconciliation engine status"
+            },
+            "health_monitoring": {
+                "GET /health": "Basic public health check",
+                "GET /health/deep": "Comprehensive health with session & news guard",
+                "GET /api/health/detailed": "Detailed component health with watchdogs",
+                "GET /api/watchdogs/status": "Self-healing watchdogs status",
+                "GET /api/reconciliation/status": "Reconciliation engine detailed status"
+            },
+            "resilience_platform": {
+                "GET /api/v1/resilience/status": "Overall resilience platform status",
+                "GET /api/v1/resilience/state-machine": "State machine status & transitions",
+                "GET /api/v1/resilience/health-score": "System health score metrics",
+                "GET /api/v1/resilience/incidents": "Active incidents list",
+                "GET /api/v1/resilience/recovery-history": "Recovery action history",
+                "GET /api/v1/resilience/backpressure": "Backpressure monitoring",
+                "GET /api/v1/resilience/cooldowns": "Cooldown timers status"
+            },
+            "admin_controls": {
+                "note": "All admin endpoints require x-api-key header",
+                "POST /admin/trading/enable": "Enable trading",
+                "POST /admin/trading/disable": "Disable trading",
+                "POST /admin/circuit-breaker/reset": "Reset circuit breaker",
+                "POST /admin/telegram/test": "Send test Telegram message",
+                "GET /admin/state": "Full system state",
+                "GET /admin/session/info": "Session scheduler status",
+                "GET /admin/news/status": "News guard status",
+                "POST /admin/kill-switch/engage": "Engage kill switch",
+                "POST /admin/kill-switch/disengage": "Disengage kill switch",
+                "GET /admin/kill-switch/status": "Kill switch status"
+            }
+        },
+        "quick_start": {
+            "check_readiness": "GET /dashboard/readiness",
+            "view_status": "GET /dashboard/status",
+            "run_full_checklist": "POST /dashboard/checklist/run",
+            "monitor_health": "GET /health/deep"
+        }
+    }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -558,3 +628,43 @@ async def safety_status():
         "kill_switch": ks_checks,
         "circuit_breaker": cb_checks,
     }
+
+
+@router.get("/reconciliation")
+async def reconciliation_status():
+    """
+    Reconciliation engine status (convenience alias for /api/reconciliation/status).
+    
+    Returns reconciliation engine running status, last run time, mismatch counts,
+    and configuration details.
+    """
+    try:
+        from app.main import state
+        
+        if not hasattr(state, 'reconciliation_engine') or not state.reconciliation_engine:
+            return {
+                "timestamp": _utc(),
+                "status": "not_initialized",
+                "detail": "Reconciliation engine not available"
+            }
+        
+        recon_status = state.reconciliation_engine.get_detailed_status()
+        
+        return {
+            "timestamp": _utc(),
+            "is_running": recon_status.get('is_running', False),
+            "last_run": recon_status.get('last_run'),
+            "total_runs": recon_status.get('total_runs', 0),
+            "total_mismatches_detected": recon_status.get('total_mismatches_detected', 0),
+            "reconciliation_interval_seconds": recon_status.get('reconciliation_interval_seconds', 120),
+            "auto_repair_enabled": recon_status.get('auto_repair_enabled', True),
+            "exchange": recon_status.get('exchange', 'unknown'),
+            "testnet": recon_status.get('testnet', True),
+            "next_run_in_seconds": recon_status.get('next_run_in_seconds'),
+        }
+    except Exception as exc:
+        return {
+            "timestamp": _utc(),
+            "status": "error",
+            "error": str(exc)
+        }

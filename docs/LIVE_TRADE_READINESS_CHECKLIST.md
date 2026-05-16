@@ -229,6 +229,7 @@ Day 3:  Start demo trading, collect trades
 
 ## API Reference
 
+### Dashboard Endpoints
 | Endpoint | Description |
 |---|---|
 | `POST /dashboard/checklist/run` | Execute all checks, return full pass/fail report |
@@ -239,6 +240,45 @@ Day 3:  Start demo trading, collect trades
 | `GET  /dashboard/ai` | AI classifier health |
 | `GET  /dashboard/strategy` | Strategy layer health |
 | `GET  /dashboard/safety` | Kill switch + circuit breakers |
+
+### Health & Monitoring Endpoints
+| Endpoint | Description |
+|---|---|
+| `GET  /health` | Basic public health check |
+| `GET  /health/deep` | Comprehensive health with session & news guard status |
+| `GET  /api/health` | Public health check (v2) |
+| `GET  /api/health/detailed` | Detailed component health with watchdogs |
+| `GET  /api/reconciliation/status` | Reconciliation engine status |
+| `GET  /api/v1/reconciliation/status` | Reconciliation status (v1) |
+| `GET  /api/v1/reconciliation/metrics` | Reconciliation metrics |
+| `GET  /api/watchdogs/status` | Self-healing watchdogs status |
+
+### Resilience Platform Endpoints
+| Endpoint | Description |
+|---|---|
+| `GET  /api/v1/resilience/status` | Overall resilience platform status |
+| `GET  /api/v1/resilience/state-machine` | State machine status & transitions |
+| `GET  /api/v1/resilience/health-score` | System health score metrics |
+| `GET  /api/v1/resilience/incidents` | Active incidents list |
+| `GET  /api/v1/resilience/recovery-history` | Recovery action history |
+| `GET  /api/v1/resilience/backpressure` | Backpressure monitoring |
+| `GET  /api/v1/resilience/cooldowns` | Cooldown timers status |
+| `POST /api/v1/resilience/reset-to-normal` | Reset system to normal mode |
+| `POST /api/v1/resilience/simulate-failure` | Test failure scenarios |
+
+### Admin Control Endpoints (Requires x-api-key)
+| Endpoint | Description |
+|---|---|
+| `POST /admin/trading/enable` | Enable trading |
+| `POST /admin/trading/disable` | Disable trading |
+| `POST /admin/circuit-breaker/reset` | Reset circuit breaker |
+| `POST /admin/telegram/test` | Send test Telegram message |
+| `GET  /admin/state` | Full system state |
+| `GET  /admin/session/info` | Session scheduler status |
+| `GET  /admin/news/status` | News guard status |
+| `POST /admin/kill-switch/engage` | Engage kill switch |
+| `POST /admin/kill-switch/disengage` | Disengage kill switch |
+| `GET  /admin/kill-switch/status` | Kill switch status |
 
 ---
 
