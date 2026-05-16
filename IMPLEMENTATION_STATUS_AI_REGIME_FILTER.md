@@ -1,9 +1,9 @@
 # Implementation Status: AI Regime Filter Optimization
 
 **Last Updated:** May 16, 2026  
-**Phase:** 2 (Paper Trading Validation)  
+**Phase:** 3 (OpenRouter Migration + Live Demo Guard)  
 **Owner:** AI Infrastructure Team  
-**Status:** ✅ PHASE 2 COMPLETE
+**Status:** ✅ PHASE 3 COMPLETE
 
 ---
 
@@ -11,7 +11,7 @@
 
 Converting Claude from "confidence adjuster" to "regime classifier" for XAUUSDT trading. Expected improvements: 73% token reduction (520→160), 70% latency reduction (2000ms→600ms), and 30-50% fewer AI calls.
 
-**Timeline:** Week 1 ✅ DONE | Week 1.5 ✅ DONE | Week 2 (paper trading) ✅ DONE | Week 3+ (advanced) 🔄 NEXT
+**Timeline:** Week 1 ✅ | Week 1.5 ✅ | Week 2 ✅ | Week 3 (OpenRouter + live guard) ✅ | Phase 4 (live demo) 🔄 NEXT
 
 ---
 
@@ -39,6 +39,16 @@ Converting Claude from "confidence adjuster" to "regime classifier" for XAUUSDT 
 - System prompt (stored once, reused): ~80 tokens
 - User context (compressed JSON): ~35 tokens
 - **Total: ~115 tokens per call** (-78% vs baseline ✅)
+
+### Phase 3 Complete ✅ (May 16, 2026)
+- **AIFilter migrated to OpenRouter** — `anthropic/claude-sonnet-4-20250514` via `OpenRouterClient.classify_regime()`
+- **Unified gateway** — cost tracking (`SpendTracker`), spend-cap enforcement, provider fallback all inherited
+- **`regime_classification` added to `MODEL_MAPPING`** — `max_tokens=100`, `temperature=0`, deterministic
+- **Rule-based fallback** — when `OpenRouterClient` unavailable: thin/dead/news → hostile, else neutral
+- **`MICRO_LIVE_ENABLED` guard** — `execute_trading_cycle` returns `micro_live_disabled` when `False`
+- **`anthropic` SDK dependency removed** from `AIFilter` — no longer needed
+- **10/10 Phase 3 tests passing** ✅
+- **44/44 total AI-filter tests passing** ✅
 
 ### Phase 2 Complete ✅ (May 16, 2026)
 - **`DailyAIReport`** — `app/analytics/daily_ai_report.py`: per-regime win-rate, avg-pnl, std-pnl, >3% underperformance alerts
@@ -416,6 +426,12 @@ Alert if any regime underperforms baseline by >3%.
 | `app/paper_trading/paper_trading_validator.py` | ✅ DONE | 10-fixture validation harness, latency/token/consistency metrics |
 | `app/execution/trading_service.py` | ✅ DONE | `close_position` wired to `daily_ai_report.record_trade_closed()` |
 | `tests/unit/test_phase2_paper_validation.py` | ✅ DONE | 12/12 tests passing |
+| `app/strategy/ai_filter/ai_filter.py` | ✅ DONE (Phase 3) | Migrated to OpenRouterClient; rule-based fallback; `anthropic` SDK removed |
+| `app/llm/openrouter_client.py` | ✅ DONE (Phase 3) | Added `regime_classification` to MODEL_MAPPING + `classify_regime()` method |
+| `app/execution/trading_service.py` | ✅ DONE (Phase 3) | `MICRO_LIVE_ENABLED` guard in `execute_trading_cycle` |
+| `tests/unit/test_phase3_openrouter.py` | ✅ DONE | 10/10 tests passing |
+| `tests/unit/test_ai_filter_regime.py` | ✅ UPDATED | Patched for OpenRouter (was Anthropic SDK) |
+| `tests/unit/test_phase2_paper_validation.py` | ✅ UPDATED | Patched for OpenRouter |
 | `app/strategy/strategy_manager.py` | ✅ DONE | `_build_market_context()`, `_track_signal()`, providers injected |
 | `app/dashboard/trading_api.py` | ✅ DONE | Injects news_guard + session_scheduler into StrategyManager |
 | `app/services/trading_service.py` | ✅ DONE | Injects news_guard + session_scheduler into StrategyManager |
@@ -509,10 +525,19 @@ Alert if any regime underperforms baseline by >3%.
 - [ ] 5-day live paper trading run (requires running system + Anthropic API key active)
 - [ ] Backtest 100+ real signals with AI vs. without (requires live data)
 
-### Week 3+ (Phase 2)
+### Week 3 ✅ COMPLETE
+- [x] Migrate AIFilter to OpenRouter (`anthropic/claude-sonnet-4-20250514`)
+- [x] Add `regime_classification` to `OpenRouterClient.MODEL_MAPPING`
+- [x] Rule-based fallback when OpenRouter unavailable
+- [x] `MICRO_LIVE_ENABLED` guard in `execute_trading_cycle`
+- [x] All prior tests updated for OpenRouter
+
+### Phase 4 (live demo) 🔄 NEXT
+- [ ] Set `MICRO_LIVE_ENABLED=True` in `.env`
+- [ ] Run `PaperTradingValidator` against live OpenRouter API (measure real p95 latency + token counts)
+- [ ] 5-day demo account run at 0.1% risk
 - [ ] Anthropic Prompt Caching (if volume >50 signals/day)
-- [ ] Optional OHLCV inclusion for edge cases
-- [ ] Dynamic multiplier tuning based on effectiveness
+- [ ] Dynamic multiplier tuning based on `DailyAIReport` effectiveness data
 - [ ] Local regime classifier migration (reduce Claude dependency)
 
 ---
@@ -539,7 +564,10 @@ Alert if any regime underperforms baseline by >3%.
 **Phase 1 Status:** ✅ COMPLETE (May 16, 2026) — 8/8 tests passing  
 **Phase 1 Status:** ✅ COMPLETE — 8/8 tests  
 **Phase 1.5 Status:** ✅ COMPLETE — 38/38 tests  
-**Phase 2 Status:** ✅ COMPLETE (May 16, 2026) — 50/50 tests  
-**Phase 3 Status:** 🔄 NEXT — live demo validation (0.1% risk, Anthropic API active)  
+**Phase 1 Status:** ✅ COMPLETE — 8/8 tests  
+**Phase 1.5 Status:** ✅ COMPLETE — 38/38 tests  
+**Phase 2 Status:** ✅ COMPLETE — 50/50 tests  
+**Phase 3 Status:** ✅ COMPLETE (May 16, 2026) — 44/44 tests  
+**Phase 4 Status:** 🔄 NEXT — live demo (set MICRO_LIVE_ENABLED=True, run PaperTradingValidator live)  
 **Owner:** AI Infrastructure Team  
 **Next Review:** 2026-05-20 (live demo go/no-go)

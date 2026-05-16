@@ -42,7 +42,7 @@ def _make_context() -> dict:
 
 @pytest.fixture
 def ai_filter():
-    with patch("app.strategy.ai_filter.ai_filter.anthropic.Anthropic"):
+    with patch("app.strategy.ai_filter.ai_filter.OpenRouterClient"):
         f = AIFilter()
         return f
 
@@ -78,7 +78,7 @@ async def test_hard_timeout_fallback(ai_filter):
     async def slow_call(*_):
         await asyncio.sleep(10)
 
-    with patch.object(ai_filter, "_call_claude_regime", side_effect=slow_call):
+    with patch.object(ai_filter, "_call_openrouter_regime", side_effect=slow_call):
         signal = _make_signal()
         result = await ai_filter.validate_signal(signal, _make_context())
 
@@ -98,7 +98,7 @@ async def test_confidence_multiplier(ai_filter):
     async def mock_call(*_):
         return json.dumps({"regime": "supportive", "multiplier": 1.1})
 
-    with patch.object(ai_filter, "_call_claude_regime", side_effect=mock_call):
+    with patch.object(ai_filter, "_call_openrouter_regime", side_effect=mock_call):
         result = await ai_filter.validate_signal(signal, _make_context())
 
     assert result is not None
@@ -117,7 +117,7 @@ async def test_confidence_decay(ai_filter):
     confidences = []
     for _ in range(3):
         signal = _make_signal(confidence=0.75, side="LONG")
-        with patch.object(ai_filter, "_call_claude_regime", side_effect=mock_neutral):
+        with patch.object(ai_filter, "_call_openrouter_regime", side_effect=mock_neutral):
             result = await ai_filter.validate_signal(signal, _make_context())
         confidences.append(result.confidence)
 
@@ -138,7 +138,7 @@ async def test_confidence_floor(ai_filter):
     ai_filter.consecutive_signals["LONG"] = 20
     ai_filter.last_signal_side = "LONG"
 
-    with patch.object(ai_filter, "_call_claude_regime", side_effect=mock_hostile):
+    with patch.object(ai_filter, "_call_openrouter_regime", side_effect=mock_hostile):
         result = await ai_filter.validate_signal(signal, _make_context())
 
     assert result is not None
@@ -154,7 +154,7 @@ async def test_avoid_regime_returns_none(ai_filter):
     async def mock_avoid(*_):
         return json.dumps({"regime": "avoid", "multiplier": 0.0})
 
-    with patch.object(ai_filter, "_call_claude_regime", side_effect=mock_avoid):
+    with patch.object(ai_filter, "_call_openrouter_regime", side_effect=mock_avoid):
         result = await ai_filter.validate_signal(signal, _make_context())
 
     assert result is None
@@ -169,7 +169,7 @@ async def test_malformed_json_fallback(ai_filter):
     async def mock_bad(*_):
         return "not valid json {{{"
 
-    with patch.object(ai_filter, "_call_claude_regime", side_effect=mock_bad):
+    with patch.object(ai_filter, "_call_openrouter_regime", side_effect=mock_bad):
         result = await ai_filter.validate_signal(signal, _make_context())
 
     assert result is not None

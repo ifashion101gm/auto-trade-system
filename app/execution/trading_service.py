@@ -364,7 +364,14 @@ class LiveTradingService:
                 return results
             
             logger.info(f"✅ Symbol validated: {symbol} (XAUUSDT Gold)")
-            
+
+            # Micro-live guard: block live execution when MICRO_LIVE_ENABLED=False
+            if not settings.MICRO_LIVE_ENABLED:
+                logger.info("⏸️  MICRO_LIVE_ENABLED=False — paper/demo mode only, skipping live execution")
+                results['status'] = 'micro_live_disabled'
+                results['message'] = 'Set MICRO_LIVE_ENABLED=True in .env to enable live trading'
+                return results
+
             # Pre-cycle self-healing health gate. This checks the monitoring
             # agent and circuit breaker before any market/exchange action.
             await self._transition_to(ExecutionState.IDLE)

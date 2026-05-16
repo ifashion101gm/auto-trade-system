@@ -32,6 +32,13 @@ class OpenRouterClient:
     
     # Model mapping by agent type - OPTIMIZED FOR COST
     MODEL_MAPPING = {
+        'regime_classification': {
+            # Regime classifier for AIFilter: deterministic JSON, hard 100-token cap
+            # Uses Claude Sonnet 4 via OpenRouter for consistency with direct-Anthropic baseline
+            'model': 'anthropic/claude-sonnet-4-20250514',
+            'max_tokens': 100,
+            'temperature': 0,
+        },
         'regime_detection': {
             'model': 'openai/gpt-4o-mini',  # Fast, cheap for simple classification
             'max_tokens': 500,
@@ -150,6 +157,31 @@ class OpenRouterClient:
             result = response.json()
             return result
     
+    async def classify_regime(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Classify XAUUSDT market regime via OpenRouter.
+
+        Used by AIFilter as a drop-in replacement for the direct Anthropic SDK call.
+        Returns raw JSON string e.g. '{"regime":"neutral","multiplier":1.0}'.
+        Falls back to neutral JSON on any error.
+        """
+        config = self.MODEL_MAPPING['regime_classification']
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ]
+        try:
+            result = await self._make_request(
+                model=config['model'],
+                messages=messages,
+                max_tokens=config['max_tokens'],
+                temperature=config['temperature'],
+            )
+            return result['choices'][0]['message']['content'].strip()
+        except Exception as e:
+            logger.warning("OpenRouter regime_classification failed: %s", e)
+            return '{"regime":"neutral","multiplier":1.0}'
+
     async def detect_regime(self, market_data: Dict[str, Any]) -> str:
         """
         Detect market regime using fast LLM.

@@ -84,15 +84,16 @@ def test_daily_report_no_alert_when_insufficient_trades():
 # ── PaperTradingValidator (mocked AI) ────────────────────────────────────────
 
 def _make_mock_filter(regime: str = "neutral"):
-    """Return an AIFilter whose _call_claude_regime always returns given regime."""
+    """Return an AIFilter whose _call_openrouter_regime always returns given regime."""
     multipliers = {"supportive": 1.1, "neutral": 1.0, "hostile": 0.85, "avoid": 0.0}
-    with patch("app.strategy.ai_filter.ai_filter.anthropic.Anthropic"):
-        f = AIFilter()
 
-    async def mock_call(*_):
+    async def mock_call(*_, **__):
         return json.dumps({"regime": regime, "multiplier": multipliers[regime]})
 
-    f._call_claude_regime = mock_call
+    with patch("app.strategy.ai_filter.ai_filter.OpenRouterClient"):
+        f = AIFilter()
+
+    f._call_openrouter_regime = mock_call
     return f
 
 
