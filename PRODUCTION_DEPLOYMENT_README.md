@@ -67,6 +67,13 @@ This directory contains comprehensive documentation and tools for deploying the 
    - Financial readiness checklist
    - GO/NO-GO decision matrix
 
+8. **[PRODUCTION_DOCKER_STORAGE_OPTIMIZATION_PLAN.md](PRODUCTION_DOCKER_STORAGE_OPTIMIZATION_PLAN.md)** ⭐ NEW
+   - **Docker storage architecture and optimization**
+   - Host directory structure for production
+   - PostgreSQL tuning and log rotation
+   - Automated cleanup and backup strategies
+   - Monitoring and alerting configuration
+
 ---
 
 ## 🛠️ Deployment Scripts
@@ -134,6 +141,32 @@ Before deploying to production, ALL of the following must be met:
 ---
 
 ## 🚀 Quick Start Guide
+
+### Phase 0: Docker Storage Setup (If Using Docker)
+
+**Before starting, configure production storage:**
+
+```bash
+# 1. Review Docker storage plan
+cat PRODUCTION_DOCKER_STORAGE_OPTIMIZATION_PLAN.md
+
+# 2. Create host directories
+sudo mkdir -p /data/{postgres,redis,prometheus,grafana,loki,logs,app,backups}
+sudo chown -R 1000:1000 /data/postgres /data/grafana /data/loki
+sudo chown -R 999:999 /data/redis
+sudo chown -R $(whoami):$(whoami) /data/logs /data/app /data/backups
+
+# 3. Configure .env.prod
+cp .env.example .env.prod
+nano .env.prod  # Set production values
+
+# 4. Start with Docker
+docker-compose --env-file .env.prod up -d
+```
+
+**See**: [PRODUCTION_DOCKER_STORAGE_OPTIMIZATION_PLAN.md](PRODUCTION_DOCKER_STORAGE_OPTIMIZATION_PLAN.md) for complete details.
+
+---
 
 ### Phase 1: Start TestNet Validation (Today)
 
