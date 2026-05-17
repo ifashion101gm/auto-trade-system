@@ -308,7 +308,17 @@ class BybitClient:
         Returns:
             Server timestamp in milliseconds
         """
-        return await self.exchange.fetch_time()
+        # Use pybit for demo trading, CCXT for testnet/mainnet
+        if self.use_pybit:
+            # Pybit get_server_time for demo trading
+            response = self.pybit_session.get_server_time()
+            if response.get('retCode') == 0:
+                return int(response.get('result', {}).get('timeSecond', 0)) * 1000
+            else:
+                raise Exception(f"Failed to fetch server time: {response.get('retMsg')}")
+        else:
+            # CCXT for testnet/mainnet
+            return await self.exchange.fetch_time()
     
     async def check_position_mode(self, symbol: str = None, category: str = "linear") -> Dict[str, Any]:
         """
@@ -554,6 +564,87 @@ class BybitClient:
             
             else:
                 raise Exception(f"Failed to fetch balance: {error_msg}")
+    
+    async def fetch_positions(self, symbol: str = None) -> List[Dict[str, Any]]:
+        """
+        Fetch all open positions.
+        
+        Args:
+            symbol: Optional symbol filter (e.g., 'BTCUSDT')
+            
+        Returns:
+            List of position dictionaries
+        """
+        try:
+            # Validate clock sync before private API call
+            await self.validate_clock_sync()
+            
+            if self.use_pybit:
+                # Pybit get_position_info for demo trading
+                # Bybit V5 requires either 'symbol' or 'settleCoin' parameter
+                if symbol:
+                    response = self.pybit_session.get_positions(
+                        category="linear",
+                        symbol=symbol
+                    )
+                else:
+                    # Fetch all positions by specifying settleCoin
+                    response = self.pybit_session.get_positions(
+                        category="linear",
+                        settleCoin="USDT"  # Required when symbol is not provided
+                    )
+                self._handle_pybit_error(response, "get_positions")
+                
+                result = response.get('result', {})
+                position_list = result.get('list', [])
+                
+                # Convert Pybit format to standard format
+                positions = []
+                for pos in position_list:
+                    size = float(pos.get('size', 0))
+                    if size > 0:  # Only return open positions
+                        positions.append({
+                            'symbol': pos.get('symbol'),
+                            'side': pos.get('side'),  # 'Buy' or 'Sell'
+                            'size': size,
+                            'entry_price': float(pos.get('avgPrice', 0)),
+                            'mark_price': float(pos.get('markPrice', 0)),
+                            'unrealized_pnl': float(pos.get('unrealisedPnl', 0)),
+                            'leverage': int(pos.get('leverage', 1)),
+                            'liquidation_price': float(pos.get('liqPrice', 0)),
+                        })
+                
+                logger.info(f"✅ Fetched {len(positions)} open positions from Bybit demo")
+                return positions
+            else:
+                # CCXT for testnet/mainnet
+                positions = await self.exchange.fetch_positions([symbol] if symbol else None)
+                
+                # Filter to only open positions
+                open_positions = [
+                    pos for pos in positions 
+                    if float(pos.get('contracts', 0)) > 0
+                ]
+                
+                logger.info(f"✅ Fetched {len(open_positions)} open positions from Bybit")
+                return open_positions
+                
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"❌ Failed to fetch positions: {error_msg}")
+            raise Exception(f"Failed to fetch positions: {error_msg}")
+    
+    async def get_open_positions(self, symbol: str = None) -> List[Dict[str, Any]]:
+        """
+        Get open positions (alias for fetch_positions for compatibility).
+        
+        Args:
+            symbol: Optional symbol filter
+            
+        Returns:
+            List of open position dictionaries
+        """
+        return await self.fetch_positions(symbol)
     
     async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         """
@@ -1032,25 +1123,118 @@ class BybitClient:
             Order status details
         """
         try:
-            order = await self.exchange.fetch_order(order_id, symbol)
-            
-            return {
-                'order_id': order['id'],
-                'symbol': order['symbol'],
-                'side': order['side'],
-                'type': order['type'],
-                'status': order['status'],
-                'price': order['price'],
-                'average': order.get('average'),
-                'amount': order['amount'],
-                'filled': order.get('filled', 0),
-                'remaining': order.get('remaining', 0),
-                'cost': order.get('cost', 0),
-                'fee': order.get('fee', {}),
-                'timestamp': order['timestamp'],
-                'last_update': order.get('lastTradeTimestamp')
-            }
+            # Use Pybit for demo trading, CCXT for testnet/mainnet
+            if hasattr(self, 'use_pybit') and self.use_pybit:
+                logger.debug(f"Using Pybit SDK to fetch order status: {order_id}")
+                
+                # Convert symbol format using standardized method
+                bybit_symbol = await self._convert_symbol_to_bybit_format(symbol, "linear")
+                
+                # First try to get from open orders
+                response = self.pybit_session.get_open_orders(
+                    category="linear",
+                    symbol=bybit_symbol,
+                    orderId=order_id
+                )
+                self._handle_pybit_error(response, "get_open_orders")
+                
+                result = response.get('result', {})
+                list_data = result.get('list', [])
+                
+                if list_data:
+                    order_data = list_data[0]
+                    return {
+                        'order_id': order_data.get('orderId'),
+                        'symbol': order_data.get('symbol'),
+                        'side': order_data.get('side', '').lower(),
+                        'type': order_data.get('orderType', '').lower(),
+                        'status': order_data.get('orderStatus', 'unknown').lower(),
+                        'price': float(order_data.get('price', 0)) if order_data.get('price') else None,
+                        'average': float(order_data.get('avgPrice', 0)) if order_data.get('avgPrice') else None,
+                        'amount': float(order_data.get('qty', 0)),
+                        'filled': float(order_data.get('cumExecQty', 0)),
+                        'remaining': float(order_data.get('leavesQty', 0)),
+                        'cost': float(order_data.get('cumExecValue', 0)),
+                        'fee': {'cost': float(order_data.get('cumExecFee', 0))},
+                        'timestamp': int(order_data.get('createdTime', 0)),
+                        'last_update': int(order_data.get('updatedTime', 0))
+                    }
+                
+                # If not in open orders, check order history
+                logger.debug(f"Order {order_id} not in open orders, checking history...")
+                response = self.pybit_session.get_order_history(
+                    category="linear",
+                    symbol=bybit_symbol,
+                    orderId=order_id
+                )
+                self._handle_pybit_error(response, "get_order_history")
+                
+                result = response.get('result', {})
+                list_data = result.get('list', [])
+                
+                if list_data:
+                    order_data = list_data[0]
+                    return {
+                        'order_id': order_data.get('orderId'),
+                        'symbol': order_data.get('symbol'),
+                        'side': order_data.get('side', '').lower(),
+                        'type': order_data.get('orderType', '').lower(),
+                        'status': order_data.get('orderStatus', 'unknown').lower(),
+                        'price': float(order_data.get('price', 0)) if order_data.get('price') else None,
+                        'average': float(order_data.get('avgPrice', 0)) if order_data.get('avgPrice') else None,
+                        'amount': float(order_data.get('qty', 0)),
+                        'filled': float(order_data.get('cumExecQty', 0)),
+                        'remaining': float(order_data.get('leavesQty', 0)),
+                        'cost': float(order_data.get('cumExecValue', 0)),
+                        'fee': {'cost': float(order_data.get('cumExecFee', 0))},
+                        'timestamp': int(order_data.get('createdTime', 0)),
+                        'last_update': int(order_data.get('updatedTime', 0))
+                    }
+                
+                # Order not found anywhere - assume it's filled and closed
+                logger.warning(f"Order {order_id} not found in open or history, assuming filled")
+                return {
+                    'order_id': order_id,
+                    'symbol': symbol,
+                    'side': 'unknown',
+                    'type': 'market',
+                    'status': 'closed',
+                    'price': None,
+                    'average': None,
+                    'amount': 0,
+                    'filled': 0,
+                    'remaining': 0,
+                    'cost': 0,
+                    'fee': {},
+                    'timestamp': None,
+                    'last_update': None
+                }
+            else:
+                # CCXT for testnet/mainnet
+                logger.debug(f"Using CCXT to fetch order status: {order_id}")
+                if not hasattr(self, 'exchange') or self.exchange is None:
+                    raise Exception("CCXT exchange not initialized")
+                
+                order = await self.exchange.fetch_order(order_id, symbol)
+                
+                return {
+                    'order_id': order['id'],
+                    'symbol': order['symbol'],
+                    'side': order['side'],
+                    'type': order['type'],
+                    'status': order['status'],
+                    'price': order['price'],
+                    'average': order.get('average'),
+                    'amount': order['amount'],
+                    'filled': order.get('filled', 0),
+                    'remaining': order.get('remaining', 0),
+                    'cost': order.get('cost', 0),
+                    'fee': order.get('fee', {}),
+                    'timestamp': order['timestamp'],
+                    'last_update': order.get('lastTradeTimestamp')
+                }
         except Exception as e:
+            logger.error(f"Failed to fetch order status for {order_id}: {e}")
             raise Exception(f"Failed to fetch order status: {str(e)}")
     
     async def cancel_order(self, order_id: str, symbol: str, max_retries: int = 3) -> Dict[str, Any]:

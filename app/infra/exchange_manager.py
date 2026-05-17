@@ -90,10 +90,23 @@ class UnifiedExchangeManager:
         """Create Bybit client."""
         from app.infra.bybit_client import BybitClient
         
+        # Use demo keys when BYBIT_USE_DEMO_DOMAIN is true
+        if settings.BYBIT_USE_DEMO_DOMAIN:
+            api_key = settings.BYBIT_DEMO_API_KEY or settings.BYBIT_API_KEY
+            api_secret = settings.BYBIT_DEMO_API_SECRET or settings.BYBIT_API_SECRET
+            demo_trading = True
+            logger.info("✅ Using Bybit DEMO trading keys (api-demo.bybit.com)")
+        else:
+            api_key = settings.BYBIT_API_KEY
+            api_secret = settings.BYBIT_API_SECRET
+            demo_trading = False
+            logger.info("✅ Using Bybit LIVE trading keys (api.bybit.com)")
+        
         return BybitClient(
-            api_key=settings.BYBIT_API_KEY,
-            api_secret=settings.BYBIT_API_SECRET,
-            testnet=self.use_testnet
+            api_key=api_key,
+            api_secret=api_secret,
+            testnet=self.use_testnet,
+            demo_trading=demo_trading
         )
     
     async def fetch_balance(self) -> Dict[str, Any]:

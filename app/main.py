@@ -468,8 +468,15 @@ async def session_scheduler_worker():
     while not state.shutdown_event.is_set():
         try:
             # Record task processing for QueueWatchdog
-            if state.queue_watchdog:
-                state.queue_watchdog.record_task_processed()
+            # Use orchestrator's watchdog if available, fallback to state.queue_watchdog
+            watchdog = None
+            if state.watchdog_orchestrator and hasattr(state.watchdog_orchestrator, 'queue_watchdog'):
+                watchdog = state.watchdog_orchestrator.queue_watchdog
+            elif state.queue_watchdog:
+                watchdog = state.queue_watchdog
+            
+            if watchdog:
+                watchdog.record_task_processed()
             
             # Check session
             trading_allowed = state.session_scheduler.is_trading_allowed()
@@ -499,8 +506,15 @@ async def telegram_queue_worker():
             msg = await asyncio.wait_for(state.telegram_queue.get(), timeout=2)
             
             # Record task processing for QueueWatchdog
-            if state.queue_watchdog:
-                state.queue_watchdog.record_task_processed()
+            # Use orchestrator's watchdog if available, fallback to state.queue_watchdog
+            watchdog = None
+            if state.watchdog_orchestrator and hasattr(state.watchdog_orchestrator, 'queue_watchdog'):
+                watchdog = state.watchdog_orchestrator.queue_watchdog
+            elif state.queue_watchdog:
+                watchdog = state.queue_watchdog
+            
+            if watchdog:
+                watchdog.record_task_processed()
             
             # Send via Telegram agent
             if state.telegram_agent:
@@ -520,8 +534,15 @@ async def heartbeat_worker():
     while not state.shutdown_event.is_set():
         try:
             # Record task processing for QueueWatchdog
-            if state.queue_watchdog:
-                state.queue_watchdog.record_task_processed()
+            # Use orchestrator's watchdog if available, fallback to state.queue_watchdog
+            watchdog = None
+            if state.watchdog_orchestrator and hasattr(state.watchdog_orchestrator, 'queue_watchdog'):
+                watchdog = state.watchdog_orchestrator.queue_watchdog
+            elif state.queue_watchdog:
+                watchdog = state.queue_watchdog
+            
+            if watchdog:
+                watchdog.record_task_processed()
             
             # Log heartbeat
             logger.debug(
