@@ -29,11 +29,13 @@ logger = logging.getLogger(__name__)
 
 # Import Prometheus metrics from main module
 try:
-    from app.main import WEBSOCKET_UPTIME_SECONDS, WEBSOCKET_RECONNECT_TOTAL
+    from app.main import WEBSOCKET_UPTIME_SECONDS, WEBSOCKET_RECONNECT_TOTAL, WEBSOCKET_CONNECTED, WEBSOCKET_MESSAGE_LATENCY
 except ImportError:
     # Fallback if metrics not available
     WEBSOCKET_UPTIME_SECONDS = None
     WEBSOCKET_RECONNECT_TOTAL = None
+    WEBSOCKET_CONNECTED = None
+    WEBSOCKET_MESSAGE_LATENCY = None
 
 
 def calculate_exponential_backoff(
@@ -212,6 +214,8 @@ class MEXCWebSocketManager:
                     WEBSOCKET_RECONNECT_TOTAL.labels(exchange="mexc").inc()
                 if WEBSOCKET_UPTIME_SECONDS:
                     WEBSOCKET_UPTIME_SECONDS.labels(exchange="mexc").set(time.time() - self._connected_since)
+                if WEBSOCKET_CONNECTED:
+                    WEBSOCKET_CONNECTED.labels(exchange="mexc").set(1)
                 
                 logger.info(f"✅ WebSocket ready with {len(self.subscriptions)} active subscriptions")
                 
@@ -623,6 +627,10 @@ class MEXCWebSocketManager:
         """Close WebSocket connection gracefully (Hummingbot pattern)."""
         logger.info("🛑 Disconnecting WebSocket...")
         self.running = False
+        
+        # Update Prometheus metrics - mark as disconnected
+        if WEBSOCKET_CONNECTED:
+            WEBSOCKET_CONNECTED.labels(exchange="mexc").set(0)
         
         # Cancel background tasks
         if self._heartbeat_task:

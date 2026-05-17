@@ -27,16 +27,27 @@ from app.recovery.recovery_service import RecoveryService
 from app.services.reconciliation_service import ReconciliationService
 from app.heartbeat_monitor import HeartbeatMonitor
 from app.monitoring.prometheus_metrics import get_metrics_collector
+from app.self_healing.watchdogs import QueueWatchdog
 
 
 async def position_sync_loop(supervisor: TaskSupervisor):
     """Position synchronization loop with WebSocket-first optimization."""
     logger.info("🔄 Starting position sync service...")
     
+    # Initialize QueueWatchdog for this loop
+    queue_watchdog = QueueWatchdog(
+        max_task_age_sec=300,
+        max_queue_depth=100,
+        check_interval_sec=60
+    )
+    
     position_sync = PositionSyncService(testnet=True)  # Demo mode
     
     # Start the optimized sync (WebSocket-first, REST fallback every 15s)
     await position_sync.start(get_session)
+    
+    # Record initial task processing
+    queue_watchdog.record_task_processed()
 
 
 async def signal_scanning_loop(supervisor: TaskSupervisor):
@@ -48,11 +59,21 @@ async def signal_scanning_loop(supervisor: TaskSupervisor):
     """
     logger.info("📊 Starting signal scanning loop...")
     
+    # Initialize QueueWatchdog to track task processing
+    queue_watchdog = QueueWatchdog(
+        max_task_age_sec=300,  # Alert if no tasks for 5 minutes
+        max_queue_depth=100,
+        check_interval_sec=60
+    )
+    
     strategy = GoldOpeningReversalStrategy()
     circuit_breaker = get_circuit_breaker()
     
     while True:
         try:
+            # Record that we're actively processing tasks
+            queue_watchdog.record_task_processed()
+            
             # Check circuit breaker before any trading activity
             metrics = {
                 'consecutive_losses': circuit_breaker.failure_counts['consecutive_losses'],
@@ -99,10 +120,20 @@ async def reconciliation_loop(supervisor: TaskSupervisor):
     """Periodic reconciliation loop (every 2 minutes)."""
     logger.info("⏱️  Starting reconciliation loop (2-minute interval)...")
     
+    # Initialize QueueWatchdog for this loop
+    queue_watchdog = QueueWatchdog(
+        max_task_age_sec=300,
+        max_queue_depth=100,
+        check_interval_sec=60
+    )
+    
     reconciliation_service = ReconciliationService()
     
     while True:
         try:
+            # Record task processing
+            queue_watchdog.record_task_processed()
+            
             async with get_session() as db_session:
                 await reconciliation_service.reconcile(mode='DEMO', db_session=db_session)
                 await reconciliation_service.reconcile(mode='LIVE', db_session=db_session)

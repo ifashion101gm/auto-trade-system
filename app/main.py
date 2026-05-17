@@ -53,7 +53,7 @@ from app.runtime.session_scheduler import SessionScheduler
 from app.runtime.news_guard import NewsGuard
 
 # Phase 2: Self-healing watchdogs
-from app.self_healing.watchdogs import WatchdogOrchestrator
+from app.self_healing.watchdogs import WatchdogOrchestrator, QueueWatchdog
 
 # Phase 3: Resilience Platform
 try:
@@ -275,8 +275,63 @@ AI_CONFIDENCE_SCORES = Histogram(
     registry=CUSTOM_REGISTRY,
 )
 
-# Legacy metrics (for backward compatibility)
-REQUEST_COUNT, REQUEST_LATENCY, WEBSOCKET_CONNECTED, EVENT_BUS_QUEUE_SIZE = None, None, None, None
+# WebSocket & Event Bus Metrics
+WEBSOCKET_CONNECTED = Gauge(
+    "websocket_connected",
+    "WebSocket connection status (1=connected, 0=disconnected)",
+    ["exchange"],
+    registry=CUSTOM_REGISTRY,
+)
+
+WEBSOCKET_MESSAGE_LATENCY = Histogram(
+    "websocket_message_latency_ms",
+    "WebSocket message latency in milliseconds",
+    ["exchange", "message_type"],
+    buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000],
+    registry=CUSTOM_REGISTRY,
+)
+
+EVENT_BUS_QUEUE_SIZE = Gauge(
+    "event_bus_queue_size",
+    "Current event bus queue depth",
+    registry=CUSTOM_REGISTRY,
+)
+
+# Trade Execution Metrics
+TRADE_EXECUTION_LATENCY = Histogram(
+    "trade_execution_latency_ms",
+    "Trade execution latency in milliseconds",
+    ["exchange", "symbol", "side"],
+    buckets=[10, 25, 50, 100, 250, 500, 1000, 2500, 5000],
+    registry=CUSTOM_REGISTRY,
+)
+
+# Data Integrity Metrics
+DESYNC_EVENTS_TOTAL = Counter(
+    "desync_events_total",
+    "Total synchronization mismatch events",
+    ["exchange", "mismatch_type"],
+    registry=CUSTOM_REGISTRY,
+)
+
+# Risk Management Metrics
+RISK_VIOLATIONS_TOTAL = Counter(
+    "risk_violations_total",
+    "Total risk limit violations",
+    ["violation_type", "risk_level"],
+    registry=CUSTOM_REGISTRY,
+)
+
+CIRCUIT_BREAKER_STATE = Gauge(
+    "circuit_breaker_state",
+    "Circuit breaker state (0=closed, 1=half-open, 2=open)",
+    ["component"],
+    registry=CUSTOM_REGISTRY,
+)
+
+# Legacy metrics placeholder (now properly defined above)
+REQUEST_COUNT = None
+REQUEST_LATENCY = None
 
 def get_or_create_metrics():
     """Initialize legacy metrics."""
@@ -324,6 +379,7 @@ class AppState:
         
         # Phase 2: Self-healing watchdogs
         self.watchdog_orchestrator: WatchdogOrchestrator = None
+        self.queue_watchdog: QueueWatchdog = None
         
         # Resilience Platform (Phase 3)
         self.resilience_manager = None
@@ -411,6 +467,10 @@ async def session_scheduler_worker():
     """Updates trading_enabled based on session windows."""
     while not state.shutdown_event.is_set():
         try:
+            # Record task processing for QueueWatchdog
+            if state.queue_watchdog:
+                state.queue_watchdog.record_task_processed()
+            
             # Check session
             trading_allowed = state.session_scheduler.is_trading_allowed()
             
@@ -438,6 +498,10 @@ async def telegram_queue_worker():
             # Wait for message with timeout
             msg = await asyncio.wait_for(state.telegram_queue.get(), timeout=2)
             
+            # Record task processing for QueueWatchdog
+            if state.queue_watchdog:
+                state.queue_watchdog.record_task_processed()
+            
             # Send via Telegram agent
             if state.telegram_agent:
                 try:
@@ -455,6 +519,10 @@ async def heartbeat_worker():
     """Periodic heartbeat for monitoring."""
     while not state.shutdown_event.is_set():
         try:
+            # Record task processing for QueueWatchdog
+            if state.queue_watchdog:
+                state.queue_watchdog.record_task_processed()
+            
             # Log heartbeat
             logger.debug(
                 f"Heartbeat: uptime={uptime_seconds()}s, "
@@ -466,18 +534,60 @@ async def heartbeat_worker():
         
         await asyncio.sleep(15)
 
+def _initialize_metrics_defaults():
+    """
+    Initialize all Prometheus metrics with default values.
+    This ensures metrics are visible in Grafana even before any events occur.
+    """
+    try:
+        # WebSocket metrics - initialize to 0 (disconnected) until connected
+        WEBSOCKET_CONNECTED.labels(exchange="mexc").set(0)
+        WEBSOCKET_CONNECTED.labels(exchange="binance").set(0)
+        WEBSOCKET_CONNECTED.labels(exchange="bybit").set(0)
+        
+        # Event bus queue - initialize to 0
+        EVENT_BUS_QUEUE_SIZE.set(0)
+        
+        # Circuit breaker - initialize to 0 (closed/healthy)
+        CIRCUIT_BREAKER_STATE.labels(component="execution_engine").set(0)
+        CIRCUIT_BREAKER_STATE.labels(component="risk_engine").set(0)
+        CIRCUIT_BREAKER_STATE.labels(component="exchange_adapter").set(0)
+        
+        # WebSocket reconnect - initialize to 0
+        WEBSOCKET_RECONNECT_TOTAL.labels(exchange="mexc").inc(0)
+        WEBSOCKET_RECONNECT_TOTAL.labels(exchange="binance").inc(0)
+        WEBSOCKET_RECONNECT_TOTAL.labels(exchange="bybit").inc(0)
+        
+        # Desync events - initialize to 0
+        DESYNC_EVENTS_TOTAL.labels(exchange="mexc", mismatch_type="position").inc(0)
+        DESYNC_EVENTS_TOTAL.labels(exchange="mexc", mismatch_type="order").inc(0)
+        DESYNC_EVENTS_TOTAL.labels(exchange="mexc", mismatch_type="balance").inc(0)
+        
+        # Risk violations - initialize to 0
+        RISK_VIOLATIONS_TOTAL.labels(violation_type="max_drawdown", risk_level="critical").inc(0)
+        RISK_VIOLATIONS_TOTAL.labels(violation_type="position_size", risk_level="warning").inc(0)
+        RISK_VIOLATIONS_TOTAL.labels(violation_type="daily_loss", risk_level="warning").inc(0)
+        
+        logger.info("✅ All Prometheus metrics initialized with default values")
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize metrics defaults: {e}")
+
 # ============================================================================
 # STARTUP / SHUTDOWN
 # ============================================================================
 
 async def init_services():
     """Initialize all services."""
-    logger.info("🚀 Initializing enterprise services...")
+    logger.info(" Initializing enterprise services...")
     
     # Database
     await init_db()
     state.db_ready = True
     logger.info("✅ Database ready")
+    
+    # Initialize metrics with default values
+    _initialize_metrics_defaults()
     
     # EventBus
     await event_bus.start_processing()
@@ -666,6 +776,14 @@ async def init_services():
         queue_check_interval=getattr(settings, 'QUEUE_WATCHDOG_CHECK_INTERVAL_SEC', 60)
     )
     logger.info("✅ Self-healing watchdogs initialized")
+    
+    # Initialize global QueueWatchdog for background workers
+    state.queue_watchdog = QueueWatchdog(
+        max_task_age_sec=300,
+        max_queue_depth=100,
+        check_interval_sec=60
+    )
+    logger.info("✅ Global QueueWatchdog initialized for background workers")
     
     # Enterprise workers (safe_loop pattern)
     asyncio.create_task(safe_loop("session_scheduler", session_scheduler_worker))

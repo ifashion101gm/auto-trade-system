@@ -28,6 +28,7 @@ from app.execution.state_validator import state_validator
 from app.events.event_bus import event_bus
 from app.execution.self_healing_engine import SelfHealingExecutionEngine
 from app.analytics.daily_ai_report import DailyAIReport
+from app.self_healing.watchdogs import QueueWatchdog
 
 logger = get_logger(__name__)
 
@@ -214,7 +215,15 @@ class LiveTradingService:
         self.anomaly_detector = self.self_healing_engine.anomaly_detector
         self.daily_ai_report = DailyAIReport()
         
+        # Initialize QueueWatchdog integration for task processing tracking
+        self.queue_watchdog = QueueWatchdog(
+            max_task_age_sec=300,  # Alert if no tasks for 5 minutes
+            max_queue_depth=100,
+            check_interval_sec=60
+        )
+        
         logger.info("✅ Self-healing execution engine initialized (health gates + dedup + anomaly recovery)")
+        logger.info("✅ Queue watchdog integrated for task processing tracking")
     
     def _get_symbol_lock(self, symbol: str) -> asyncio.Lock:
         """
@@ -375,6 +384,9 @@ class LiveTradingService:
             # Pre-cycle self-healing health gate. This checks the monitoring
             # agent and circuit breaker before any market/exchange action.
             await self._transition_to(ExecutionState.IDLE)
+            
+            # Record task processing for QueueWatchdog
+            self.queue_watchdog.record_task_processed()
             
             health_decision = await self.self_healing_engine.run_preflight({
                 'user_id': user_id,
@@ -665,6 +677,9 @@ class LiveTradingService:
             results['status'] = 'success'
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
             
+            # Record successful task completion for QueueWatchdog
+            self.queue_watchdog.record_task_processed()
+            
             logger.info(f"\n✅ Trading cycle completed in {results['cycle_time_ms']:.0f}ms")
             return results
             
@@ -678,6 +693,9 @@ class LiveTradingService:
             results['status'] = 'failed'
             results['error'] = str(e)
             results['cycle_time_ms'] = (time.time() - cycle_start) * 1000
+            
+            # Record task attempt for QueueWatchdog (even failed attempts count as processing)
+            self.queue_watchdog.record_task_processed()
             
             logger.error(f"\n❌ Trading cycle failed: {e}")
             logger.exception("Traceback:")

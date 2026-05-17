@@ -1,0 +1,76 @@
+# Tmux Configuration for Claude Code Development
+# Location: ~/.tmux.conf
+
+# Set default shell to bash
+set-option -g default-shell /bin/bash
+
+# Enable mouse support (scrolling, clicking, resizing)
+set -g mouse on
+
+# Set scrollback buffer to 50000 lines
+set -g history-limit 50000
+
+# Better window splitting shortcuts
+bind | split-window -h    # Vertical split with |
+bind - split-window -v    # Horizontal split with -
+
+# Status bar customization
+set -g status-interval 5
+set -g status-left '[#S] '
+set -g status-right '%Y-%m-%d %H:%M'
+
+# Use 256 colors for better terminal support
+set -g default-terminal "screen-256color"
+
+# Enable vi mode for copy/paste
+setw -g mode-keys vi
+
+# Quick reload of config file
+bind r source-file ~/.tmux.conf \; display-message "Config reloaded!"
+
+# Activity monitoring
+setw -g monitor-activity on
+set -g visual-activity on
+
+# Set window titles automatically
+set -g set-titles on
+set -g set-titles-string '#T'
+
+# Start window numbering at 1 instead of 0
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Longer command history
+set -g history-file ~/.tmux/history
+
+# Escape time reduction for better responsiveness
+set -sg escape-time 0
+
+# Automatic window renaming
+setw -g automatic-rename on
+setw -g automatic-rename-format '#{basename:pane_current_path}'
+
+# Bell notifications
+setw -g monitor-bell on
+set -g visual-bell on
+
+# Key bindings for easier navigation
+bind -r C-h select-window -t :-  # Previous window
+bind -r C-l select-window -t :+  # Next window
+
+# Resize panes with Ctrl+arrow keys
+bind -r Left resize-pane -L 5
+bind -r Right resize-pane -R 5
+bind -r Up resize-pane -U 3
+bind -r Down resize-pane -D 3
+
+# Swap panes
+bind < swap-pane -U
+bind > swap-pane -D
+
+# Synchronize panes (broadcast input to all panes)
+bind C-s set-window-option synchronize-panes
+
+# Save and restore sessions (requires tmux-resurrect plugin if installed)
+# bind C-s run '~/clone/tmux-resurrect/scripts/save.sh'
+# bind C-r run '~/clone/tmux-resurrect/scripts/restore.sh'
