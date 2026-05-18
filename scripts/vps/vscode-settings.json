@@ -1,0 +1,16 @@
+{
+    "remote.SSH.remotePlatform": {
+        "vps-trading": "linux"
+    },
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 1000,
+    "terminal.integrated.cwd": "/opt/auto-trade-system",
+    "python.defaultInterpreterPath": "/opt/auto-trade-system/.venv/bin/python",
+    "workbench.colorTheme": "Default Dark+",
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4,
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "git.autofetch": true,
+    "docker.compose.selected": "docker-compose.yml"
+}

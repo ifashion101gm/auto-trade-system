@@ -830,16 +830,18 @@ class LiveTradingService:
         quantity = proposal['quantity']
         leverage = proposal['leverage']
         
-        # Check minimum balance for live trading
-        if not self.use_testnet:
-            try:
-                balance = await self.exchange_manager.fetch_balance()
+        # Fetch balance for risk validation (both live and demo)
+        balance = None
+        try:
+            balance = await self.exchange_manager.fetch_balance()
+            if not self.use_testnet:
+                # Check minimum balance for live trading
                 if balance['total_usdt'] < settings.LIVE_TRADING_MIN_BALANCE_USD:
                     error_msg = f"Insufficient balance: ${balance['total_usdt']:.2f} < ${settings.LIVE_TRADING_MIN_BALANCE_USD:.2f}"
                     logger.error(error_msg)
                     raise ValueError(error_msg)
-            except Exception as e:
-                logger.warning(f"Could not verify balance: {e}. Proceeding with caution.")
+        except Exception as e:
+            logger.warning(f"Could not verify balance: {e}. Proceeding with caution.")
         
         # Calculate position value in USD
         position_value_usd = entry_price * quantity

@@ -19,7 +19,7 @@ services:
     environment:
       # SECURITY: Force users to set strong password in .env file
       POSTGRES_USER: ${DB_USER:-trading}
-      POSTGRES_PASSWORD: ${DB_PASSWORD:?ERROR: Set DB_PASSWORD to a strong password in .env before deploying}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD to a strong password in .env before deploying}
       POSTGRES_DB: ${DB_NAME:-vmassit}
       # PostgreSQL configuration for better connection handling
       POSTGRES_MAX_CONNECTIONS: "100"
@@ -120,7 +120,7 @@ services:
       - "3000:3000"
     environment:
       # SECURITY: Force users to set strong password in .env file
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?ERROR: Set GRAFANA_PASSWORD to a strong password in .env before deploying}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?Set GRAFANA_PASSWORD to a strong password in .env before deploying}
       GF_INSTALL_PLUGINS: ""
     volumes:
       - grafana-data:/var/lib/grafana

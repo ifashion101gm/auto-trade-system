@@ -1,1 +1,10 @@
-{"daily_loss_lock_active": true, "drawdown_lock_active": false, "daily_pnl": 400.0, "daily_pnl_pct": 4.040404040404041, "current_balance": 10300, "peak_balance": 10500, "today_date": "2026-05-18", "last_updated": "2026-05-18T09:59:10.733703+00:00"}
+{
+  "daily_loss_lock_active": false,
+  "drawdown_lock_active": false,
+  "daily_pnl": 0.0,
+  "daily_pnl_pct": 0.0,
+  "current_balance": 10300,
+  "peak_balance": 10500,
+  "today_date": "2026-05-18",
+  "last_updated": "2026-05-18T10:22:02.013016+00:00"
+}

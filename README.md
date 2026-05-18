@@ -120,6 +120,37 @@ cat PRODUCTION_ENHANCED_MONITORING.md
 cat QUICK_REFERENCE_PRODUCTION_MONITORING.md
 ```
 
+## 🌐 Deployment Options
+
+The Auto Trade System supports multiple deployment modes to suit different needs:
+
+### Option 1: Local Deployment (Current)
+Run directly on your machine using systemd services. Best for development and testing.
+- **Pros**: Simple setup, easy debugging, no cloud costs
+- **Cons**: Depends on local machine uptime, local IP for API calls
+- **Setup**: Follow [Quick Start](#quick-start) above
+- **Services**: FastAPI API + Worker via systemd
+
+### Option 2: VPS Deployment (Production)
+Deploy to cloud VPS using Docker Compose with Tailscale for secure access.
+- **Pros**: 24/7 uptime, Singapore IP for exchanges, production environment, isolated infrastructure
+- **Cons**: Cloud hosting costs ($5-15/month), requires VPS management
+- **Setup**: See [VPS Deployment Guide](docs/VPS_DEPLOYMENT_GUIDE.md)
+- **Services**: Full Docker Compose stack (PostgreSQL, Redis, Prometheus, Grafana, Trading Bot, Worker)
+- **Security**: Tailscale encrypted mesh network, no public ports exposed
+
+### Option 3: Remote Development
+Use VS Code Remote SSH to develop on VPS while editing locally.
+- **Pros**: Best of both worlds - local editing + remote execution, Claude Code on Singapore IP
+- **Cons**: Requires Tailscale setup, SSH configuration
+- **Setup**: See [Remote Development Guide](docs/VPS_REMOTE_DEVELOPMENT.md)
+- **Workflow**: Edit in VS Code → Execute on VPS → Access APIs from Singapore IP
+
+**Recommendation**: 
+- Development/Testing → Local Deployment
+- Production Trading → VPS Deployment
+- AI-Assisted Development → Remote Development
+
 ## 📚 Installation & Technology References
 
 This section provides direct links to official documentation for all core technologies used in the Auto Trade System.
