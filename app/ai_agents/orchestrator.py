@@ -636,9 +636,25 @@ class AIAgentOrchestrator:
         # Calculate quantity to ensure position value stays within limits
         # Formula: quantity = (max_notional × confidence) / (entry_price × leverage)
         # This ensures: entry_price × quantity × leverage = max_notional × confidence ≤ max_notional
-        quantity = (max_notional_value * min(confidence, 1.0)) / (current_price * leverage)
+        raw_quantity = (max_notional_value * min(confidence, 1.0)) / (current_price * leverage)
         
-        logger.info(f"📊 Final Position - Entry: ${current_price:.2f}, Qty: {quantity:.6f}, Leverage: {leverage}x, Notional: ${current_price * quantity * leverage:.2f}")
+        # CRITICAL FIX: Round quantity to match exchange precision requirements
+        # Bybit requires quantities to match qtyStep (lot size increment)
+        # For XAUUSDT and similar symbols, round to 4 decimal places as safe default
+        # The execution layer will further refine this based on actual instrument info
+        symbol = market_data.get('symbol', '')
+        if 'XAU' in symbol or 'PAXG' in symbol or 'XAUT' in symbol:
+            # Gold symbols typically use 3-4 decimal places
+            quantity = round(raw_quantity, 4)
+        elif 'BTC' in symbol:
+            quantity = round(raw_quantity, 3)
+        elif 'ETH' in symbol:
+            quantity = round(raw_quantity, 2)
+        else:
+            # Default: round to 4 decimal places for safety
+            quantity = round(raw_quantity, 4)
+        
+        logger.info(f"📊 Final Position - Entry: ${current_price:.2f}, Qty: {quantity:.6f} (raw: {raw_quantity:.8f}), Leverage: {leverage}x, Notional: ${current_price * quantity * leverage:.2f}")
         
         return {
             "symbol": market_data.get('symbol', 'BTC/USDT'),

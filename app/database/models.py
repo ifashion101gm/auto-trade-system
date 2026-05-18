@@ -407,7 +407,7 @@ class OrderEvents(Base):
     trade_id = Column(String(36), nullable=True)
     event_type = Column(String(50), nullable=False)
     payload = Column(JSON, nullable=False)  # FIXED: Changed from Text to JSON to match DB schema
-    created_at = Column(Text, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)  # FIXED: Changed from Text to DateTime to match DB schema
 
     __table_args__ = (
         Index('idx_order_events_trade_id', 'trade_id'),
