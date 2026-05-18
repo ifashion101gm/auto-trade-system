@@ -348,38 +348,45 @@ class DatabaseWatchdog:
             'timestamp': datetime.utcnow().isoformat()
         }
         
-        # Test basic connectivity
+        # Test basic connectivity (with timeout to prevent event loop starvation)
         try:
             start = time.time()
-            
-            if self.db_session_factory:
-                async with self.db_session_factory() as session:
-                    from sqlalchemy import text
-                    await session.execute(text("SELECT 1"))
-                    
-                    # Check pool stats if available
-                    engine = session.get_bind()
-                    if hasattr(engine.pool, 'status'):
-                        pool_status = engine.pool.status()
-                        results['pool_utilization'] = self._parse_pool_status(pool_status)
-            
-            else:
-                # Mock for testing
-                await asyncio.sleep(0.05)
-            
+
+            async def _do_db_check():
+                if self.db_session_factory:
+                    async with self.db_session_factory() as session:
+                        from sqlalchemy import text
+                        await session.execute(text("SELECT 1"))
+
+                        engine = session.get_bind()
+                        if hasattr(engine.pool, 'status'):
+                            pool_status = engine.pool.status()
+                            results['pool_utilization'] = self._parse_pool_status(pool_status)
+                else:
+                    await asyncio.sleep(0.05)
+
+            await asyncio.wait_for(_do_db_check(), timeout=10.0)
+
             query_latency = (time.time() - start) * 1000
             results['connectivity'] = 'healthy'
             results['query_performance'] = {
                 'simple_query_ms': round(query_latency, 2)
             }
-            
+
             logger.debug(f"DB connectivity check passed: {query_latency:.0f}ms")
-            
-        except Exception as e:
+
+        except asyncio.TimeoutError:
             results['connectivity'] = 'failed'
-            results['error'] = str(e)
-            logger.error(f"❌ Database connectivity check failed: {e}")
-            
+            results['error'] = 'DB check timed out after 10s'
+            logger.error("❌ Database connectivity check timed out after 10s")
+            await self.alert_db_failure(TimeoutError("DB check timed out after 10s"))
+
+        except Exception as e:
+            error_detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            results['connectivity'] = 'failed'
+            results['error'] = error_detail
+            logger.error(f"❌ Database connectivity check failed: {error_detail}")
+
             await self.alert_db_failure(e)
         
         # Check for stale transactions (if supported)
@@ -413,14 +420,15 @@ class DatabaseWatchdog:
     
     async def alert_db_failure(self, error: Exception):
         """Alert operators of database failure via Telegram."""
-        logger.critical(f"🚨 DATABASE FAILURE DETECTED: {error}")
+        error_detail = f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
+        logger.critical(f"🚨 DATABASE FAILURE DETECTED: {error_detail}")
 
         if ALERT_MANAGER_AVAILABLE:
             try:
                 await get_alert_manager().send_alert(
                     level=AlertLevel.CRITICAL,
                     title="Database Failure Detected",
-                    message=f"DB connectivity check failed: {error}",
+                    message=f"DB connectivity check failed: {error_detail}",
                     alert_type="db_failure",
                     urgency=AlertUrgency.HIGH,
                 )
