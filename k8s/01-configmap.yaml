@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trading-config
+  namespace: trading
+data:
+  # Exchange
+  ACTIVE_EXCHANGE: "bybit"
+  BYBIT_TESTNET: "true"           # flip to "false" for live
+
+  # Execution
+  EXECUTION_MODE: "semi-auto"
+  ENABLED_TRADING_SYMBOLS: "XAUUSDT"
+  PRIMARY_TRADING_SYMBOL: "XAUUSDT"
+
+  # WebSocket staleness guard (seconds before a cycle is skipped)
+  WEBSOCKET_STALENESS_THRESHOLD_SECONDS: "30"
+
+  # Risk / circuit breaker
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD: "5"
+  CIRCUIT_BREAKER_RECOVERY_TIMEOUT: "300"
+  MAX_EXECUTION_RETRIES: "3"
+  MAX_SLIPPAGE_PCT: "0.5"
+  MAX_API_LATENCY_MS: "5000"
+  MAX_DRAWDOWN_PCT: "5.0"
+
+  # Reconciliation
+  RECONCILIATION_INTERVAL_SECONDS: "60"
+  RECONCILIATION_AUTO_REPAIR: "true"
+
+  # Observability
+  LOG_FORMAT: "json"
+  LOG_LEVEL: "INFO"
+  MEMORY_WATCHDOG_WARNING_THRESHOLD_MB: "256"
+  MEMORY_WATCHDOG_CRITICAL_THRESHOLD_MB: "512"
+
+  # Database (host + dbname only — credentials in Secret)
+  DB_NAME: "vmassit"
+  DB_USER: "trading"

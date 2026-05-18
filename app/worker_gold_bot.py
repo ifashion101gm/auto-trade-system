@@ -28,6 +28,8 @@ from app.services.reconciliation_service import ReconciliationService
 from app.heartbeat_monitor import HeartbeatMonitor
 from app.monitoring.prometheus_metrics import get_metrics_collector
 from app.self_healing.watchdogs import QueueWatchdog
+from app.runtime.news_guard import NewsGuard, NewsGuardSafetyException
+from app.execution.trading_service import LiveTradingService
 
 
 async def position_sync_loop(supervisor: TaskSupervisor):
@@ -56,6 +58,7 @@ async def signal_scanning_loop(supervisor: TaskSupervisor):
     
     Checks for trading signals every 30 seconds during active sessions.
     Integrates with circuit breaker for safety.
+    Includes WebSocket staleness guard to prevent trading on outdated data.
     """
     logger.info("📊 Starting signal scanning loop...")
     
@@ -68,6 +71,8 @@ async def signal_scanning_loop(supervisor: TaskSupervisor):
     
     strategy = GoldOpeningReversalStrategy()
     circuit_breaker = get_circuit_breaker()
+    position_sync = PositionSyncService(testnet=True)  # For WebSocket staleness check
+    news_guard = NewsGuard(default_buffer_minutes=30)  # L2: News guard for hard halt
     
     while True:
         try:
@@ -86,6 +91,23 @@ async def signal_scanning_loop(supervisor: TaskSupervisor):
             if not circuit_breaker.check_and_update(metrics):
                 logger.warning(f"⚠️  Trading disabled by circuit breaker: {circuit_breaker.disable_reason}")
                 await asyncio.sleep(60)  # Wait longer when disabled
+                continue
+            
+            # L1 EXECUTION SAFETY: Check WebSocket staleness before trading
+            if position_sync.is_websocket_stale(settings.WEBSOCKET_STALENESS_THRESHOLD_SECONDS):
+                logger.warning(
+                    f"🚫 Skipping trading cycle due to stale WebSocket data "
+                    f"(>{settings.WEBSOCKET_STALENESS_THRESHOLD_SECONDS}s old)"
+                )
+                await asyncio.sleep(10)  # Brief wait before retry
+                continue
+            
+            # L2 EXECUTION SAFETY: Enforce news guard hard halt BEFORE data fetching
+            try:
+                news_guard.enforce_safety_check()
+            except NewsGuardSafetyException as e:
+                logger.warning(f"🚫 Trading cycle halted by news guard: {e}")
+                await asyncio.sleep(60)  # Wait during news event
                 continue
             
             # Check if within trading session
@@ -116,31 +138,52 @@ async def signal_scanning_loop(supervisor: TaskSupervisor):
             await asyncio.sleep(10)
 
 
-async def reconciliation_loop(supervisor: TaskSupervisor):
-    """Periodic reconciliation loop (every 2 minutes)."""
-    logger.info("⏱️  Starting reconciliation loop (2-minute interval)...")
-    
-    # Initialize QueueWatchdog for this loop
+async def reconciliation_fast_loop(supervisor: TaskSupervisor):
+    """Fast open-position drift check (every 10s) — catches fill/close mismatches quickly."""
+    logger.info("⚡ Starting fast reconciliation loop (%ss interval)...", settings.RECONCILIATION_FAST_INTERVAL_SECONDS)
+
+    queue_watchdog = QueueWatchdog(
+        max_task_age_sec=60,
+        max_queue_depth=100,
+        check_interval_sec=30
+    )
+
+    reconciliation_service = ReconciliationService()
+
+    while True:
+        try:
+            queue_watchdog.record_task_processed()
+            async with get_session() as db_session:
+                # DEMO mode only — fast check for open position drift
+                await reconciliation_service.reconcile(mode='DEMO', db_session=db_session)
+        except Exception as e:
+            logger.error(f"Fast reconciliation error: {e}", exc_info=True)
+
+        await asyncio.sleep(settings.RECONCILIATION_FAST_INTERVAL_SECONDS)
+
+
+async def reconciliation_full_loop(supervisor: TaskSupervisor):
+    """Full deep reconciliation loop (every 2 minutes) — DEMO + LIVE modes."""
+    logger.info("⏱️  Starting full reconciliation loop (%ss interval)...", settings.RECONCILIATION_INTERVAL_SECONDS)
+
     queue_watchdog = QueueWatchdog(
         max_task_age_sec=300,
         max_queue_depth=100,
         check_interval_sec=60
     )
-    
+
     reconciliation_service = ReconciliationService()
-    
+
     while True:
         try:
-            # Record task processing
             queue_watchdog.record_task_processed()
-            
             async with get_session() as db_session:
                 await reconciliation_service.reconcile(mode='DEMO', db_session=db_session)
                 await reconciliation_service.reconcile(mode='LIVE', db_session=db_session)
         except Exception as e:
-            logger.error(f"Reconciliation error: {e}", exc_info=True)
-        
-        await asyncio.sleep(120)
+            logger.error(f"Full reconciliation error: {e}", exc_info=True)
+
+        await asyncio.sleep(settings.RECONCILIATION_INTERVAL_SECONDS)
 
 
 async def heartbeat_monitor_loop(supervisor: TaskSupervisor):
@@ -201,9 +244,15 @@ async def main():
         await recovery_service.recover_on_startup(db_session)
     logger.info("✅ Startup recovery completed")
     
+    # C3: Start LLM inference pre-computation loop (warm the cache before first trade)
+    logger.info("🧠 Starting LLM inference pre-computation loop...")
+    _trading_svc = LiveTradingService()
+    _trading_svc.start_background_inference()
+    logger.info("✅ LLM inference cache warming started")
+
     # Create task supervisor
     supervisor = TaskSupervisor(max_restart_attempts=5)
-    
+
     # Start supervised tasks
     logger.info("🔧 Starting supervised background tasks...")
     
@@ -231,8 +280,15 @@ async def main():
     
     # Non-critical tasks (log failures but don't restart indefinitely)
     supervisor.create_task(
-        reconciliation_loop(supervisor),
-        name="reconciliation",
+        reconciliation_fast_loop(supervisor),
+        name="reconciliation_fast",
+        critical=True,
+        restart_delay=5.0
+    )
+
+    supervisor.create_task(
+        reconciliation_full_loop(supervisor),
+        name="reconciliation_full",
         critical=False,
         restart_delay=10.0
     )

@@ -1,4 +1,10 @@
 """
+DEPRECATED - ARCHIVED ON 2026-05-18
+
+This file has been superseded by app/main.py which contains all enterprise features.
+Do not use this file. See docs_archive/README.md for details.
+
+Original description:
 Enterprise Main - Enhanced FastAPI control plane with session scheduling and admin controls.
 
 This is an ADDITIVE upgrade to the existing main.py that adds:

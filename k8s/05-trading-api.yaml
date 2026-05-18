@@ -1,0 +1,139 @@
+---
+# Trading API — Deployment (stateless FastAPI, safe to scale)
+# replicas: 2 for zero-downtime rolling deploys; maxUnavailable: 0 ensures no gap
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trading-api
+  namespace: trading
+  labels:
+    app: trading-api
+    component: control-plane
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0     # always keep 2 running pods during rollout
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: trading-api
+  template:
+    metadata:
+      labels:
+        app: trading-api
+        component: control-plane
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: trading-api
+          image: auto-trade-system:latest  # replace with your registry path
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+          envFrom:
+            - configMapRef:
+                name: trading-config
+          env:
+            # Compose DATABASE_URL from parts (host uses StatefulSet headless DNS)
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@postgres-0.postgres.trading.svc:5432/$(DB_NAME)"
+            - name: REDIS_URL
+              value: "redis://redis-0.redis.trading.svc:6379/0"
+            # Secrets injected individually
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: DB_PASSWORD
+            - name: BYBIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BYBIT_API_KEY
+            - name: BYBIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BYBIT_API_SECRET
+            - name: BINANCE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BINANCE_API_KEY
+                  optional: true     # failover optional
+            - name: BINANCE_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BINANCE_API_SECRET
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: ADMIN_API_KEY
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: TELEGRAM_BOT_TOKEN
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: TELEGRAM_CHAT_ID
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+---
+# ClusterIP service — traffic load-balanced across both API pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: trading-api
+  namespace: trading
+spec:
+  selector:
+    app: trading-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+---
+# PodDisruptionBudget — guarantee at least 1 pod up during voluntary disruptions
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: trading-api-pdb
+  namespace: trading
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: trading-api

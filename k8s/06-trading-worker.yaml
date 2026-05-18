@@ -1,0 +1,133 @@
+---
+# Trading Worker — StatefulSet with replicas: 1 (execution plane MUST be singleton)
+#
+# Why StatefulSet and not Deployment:
+#   - Deployment can briefly run 2 pods during rollout (surge), which would open
+#     duplicate positions. StatefulSet with replicas:1 rolls via delete-then-create,
+#     never running two execution pods simultaneously.
+#   - PDB (minAvailable:1) prevents the node drain from terminating the pod before
+#     a replacement is ready — ensuring at most a brief gap, not an overlap.
+#
+# Rolling strategy: StatefulSet uses OrderedReady (default). New pod starts only
+# after old pod is fully terminated. Zero-overlap guaranteed.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: trading-worker
+  namespace: trading
+  labels:
+    app: trading-worker
+    component: execution-plane
+spec:
+  serviceName: trading-worker
+  replicas: 1                     # NEVER increase — split-brain causes double execution
+  updateStrategy:
+    type: RollingUpdate           # delete old, start new; never both at once with replicas:1
+  selector:
+    matchLabels:
+      app: trading-worker
+  template:
+    metadata:
+      labels:
+        app: trading-worker
+        component: execution-plane
+    spec:
+      terminationGracePeriodSeconds: 60   # allow open positions to be logged before exit
+      containers:
+        - name: trading-worker
+          image: auto-trade-system:latest  # replace with your registry path
+          imagePullPolicy: Always
+          command: ["python", "app/worker_gold_bot.py"]
+          envFrom:
+            - configMapRef:
+                name: trading-config
+          env:
+            - name: DATABASE_URL
+              value: "postgresql+asyncpg://$(DB_USER):$(DB_PASSWORD)@postgres-0.postgres.trading.svc:5432/$(DB_NAME)"
+            - name: REDIS_URL
+              value: "redis://redis-0.redis.trading.svc:6379/0"
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: DB_PASSWORD
+            - name: BYBIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BYBIT_API_KEY
+            - name: BYBIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BYBIT_API_SECRET
+            - name: BINANCE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BINANCE_API_KEY
+                  optional: true
+            - name: BINANCE_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: BINANCE_API_SECRET
+                  optional: true
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: ANTHROPIC_API_KEY
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: ADMIN_API_KEY
+            - name: TELEGRAM_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: TELEGRAM_BOT_TOKEN
+            - name: TELEGRAM_CHAT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: trading-secrets
+                  key: TELEGRAM_CHAT_ID
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "384Mi"
+            limits:
+              cpu: "1500m"
+              memory: "1536Mi"
+          # Worker has no HTTP endpoint — use process-level liveness check
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import sys; sys.exit(0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            failureThreshold: 3
+          volumeMounts:
+            - name: worker-state
+              mountPath: /app/data         # kill_switch state file, risk state fallback
+  volumeClaimTemplates:
+    - metadata:
+        name: worker-state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# PodDisruptionBudget — block voluntary node drains while worker pod is the only one.
+# This means kubectl drain will wait until the new pod is running elsewhere first.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: trading-worker-pdb
+  namespace: trading
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: trading-worker

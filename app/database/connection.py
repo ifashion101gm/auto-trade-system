@@ -1,13 +1,13 @@
 """
 Database connection and configuration module.
-Supports both SQLite (with WAL mode) and PostgreSQL.
+Supports PostgreSQL with asyncpg.
 Enhanced with robust error handling, health checks, and automatic reconnection.
 """
 import os
 import logging
 import asyncio
 from typing import Optional
-from sqlalchemy import event, text
+from sqlalchemy import text
 from sqlalchemy.exc import OperationalError, DisconnectionError
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -38,17 +38,6 @@ db_health_status = {
     'consecutive_failures': 0,
     'last_error': None
 }
-
-# Enable WAL mode for SQLite using event listeners
-if "sqlite" in DATABASE_URL:
-    @event.listens_for(engine.sync_engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA cache_size=-64000")  # 64MB cache
-        cursor.execute("PRAGMA temp_store=MEMORY")
-        cursor.close()
 
 # Create session factory with proper error handling
 async_session_maker = sessionmaker(

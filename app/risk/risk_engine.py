@@ -121,7 +121,7 @@ class RiskEngine:
         self.kill_switch = kill_switch
 
     def _load_risk_state(self):
-        """Load persisted risk state from disk."""
+        """Load persisted risk state from disk (DEPRECATED - will be removed)."""
         try:
             if os.path.exists(self.state_file):
                 with open(self.state_file, 'r') as f:
@@ -133,12 +133,38 @@ class RiskEngine:
                     self.current_balance = data.get('current_balance', self.current_balance)
                     self.peak_balance = data.get('peak_balance', self.peak_balance)
                     self.today_date = data.get('today_date', self.today_date)
-                    logger.info(f"Loaded risk state from {self.state_file}")
+                    logger.info(f"Loaded risk state from {self.state_file} (DEPRECATED - migrate to PostgreSQL)")
         except Exception as e:
             logger.warning(f"Failed to load risk state: {e}")
+    
+    async def _load_risk_state_from_db(self, db_session):
+        """Load risk state from PostgreSQL (single source of truth)."""
+        try:
+            from sqlalchemy import select
+            from app.database.models import RiskState
+            
+            result = await db_session.execute(select(RiskState).where(RiskState.id == 1))
+            state = result.scalar_one_or_none()
+            
+            if state:
+                self.daily_loss_lock_active = bool(state.daily_loss_lock_active)
+                self.drawdown_lock_active = bool(state.drawdown_lock_active)
+                self.daily_pnl = state.daily_pnl
+                self.daily_pnl_pct = state.daily_pnl_pct
+                self.current_balance = state.current_balance
+                self.peak_balance = state.peak_balance
+                self.today_date = state.today_date
+                logger.info("✅ Loaded risk state from PostgreSQL")
+                return True
+            else:
+                logger.warning("No risk state row found in database, using defaults")
+                return False
+        except Exception as e:
+            logger.warning(f"Failed to load risk state from DB: {e}")
+            return False
 
     def _persist_risk_state(self):
-        """Persist current risk state to disk."""
+        """Persist current risk state to disk (DEPRECATED - will be removed)."""
         try:
             payload = {
                 'daily_loss_lock_active': self.daily_loss_lock_active,
@@ -155,30 +181,87 @@ class RiskEngine:
             self.last_risk_state_write = datetime.now(timezone.utc)
         except Exception as e:
             logger.warning(f"Failed to persist risk state: {e}")
+    
+    async def _persist_risk_state_to_db(self, db_session):
+        """Persist risk state to PostgreSQL with row-level locking (C1 architecture decision).
 
-    async def reset_daily_loss_lock(self, authorized_by: str = 'system') -> bool:
+        Uses SELECT FOR UPDATE so concurrent writers (API pods + worker pod) are serialized
+        at the database level — prevents dirty writes when two instances update daily_pnl
+        simultaneously. Lock held only for the duration of the read-modify-write; released
+        on commit.
+        """
+        try:
+            from sqlalchemy import select
+            from app.database.models import RiskState
+
+            # Acquire exclusive row lock before read — blocks concurrent writers
+            result = await db_session.execute(
+                select(RiskState).where(RiskState.id == 1).with_for_update()
+            )
+            state = result.scalar_one_or_none()
+
+            if state:
+                state.daily_loss_lock_active = int(self.daily_loss_lock_active)
+                state.drawdown_lock_active = int(self.drawdown_lock_active)
+                state.daily_pnl = self.daily_pnl
+                state.daily_pnl_pct = self.daily_pnl_pct
+                state.current_balance = self.current_balance
+                state.peak_balance = self.peak_balance
+                state.today_date = self.today_date
+                state.last_updated = datetime.now(timezone.utc)
+            else:
+                # First write — no lock needed (row doesn't exist yet)
+                new_state = RiskState(
+                    id=1,
+                    daily_loss_lock_active=int(self.daily_loss_lock_active),
+                    drawdown_lock_active=int(self.drawdown_lock_active),
+                    daily_pnl=self.daily_pnl,
+                    daily_pnl_pct=self.daily_pnl_pct,
+                    current_balance=self.current_balance,
+                    peak_balance=self.peak_balance,
+                    today_date=self.today_date
+                )
+                db_session.add(new_state)
+
+            await db_session.commit()  # releases FOR UPDATE lock
+            logger.debug("✅ Risk state persisted to PostgreSQL (locked write)")
+        except Exception as e:
+            logger.error(f"Failed to persist risk state to DB: {e}")
+            await db_session.rollback()
+
+    async def reset_daily_loss_lock(self, authorized_by: str = 'system', db_session=None) -> bool:
         """Reset the daily loss lock after manual review."""
         if not self.daily_loss_lock_active:
             return False
         self.daily_loss_lock_active = False
-        self._persist_risk_state()
+        # DEPRECATED: JSON write removed — PostgreSQL is canonical (C1 architecture decision)
+
+        # Persist to PostgreSQL (single source of truth)
+        if db_session:
+            await self._persist_risk_state_to_db(db_session)
+
         logger.info(f"🔓 Daily loss lock reset by {authorized_by}")
         return True
 
-    async def reset_drawdown_lock(self, authorized_by: str = 'system') -> bool:
+    async def reset_drawdown_lock(self, authorized_by: str = 'system', db_session=None) -> bool:
         """Reset the drawdown lock after manual review."""
         if not self.drawdown_lock_active:
             return False
         self.drawdown_lock_active = False
-        self._persist_risk_state()
-        logger.info(f"🔓 Drawdown lock reset by {authorized_by}")
+        # DEPRECATED: JSON write removed — PostgreSQL is canonical (C1 architecture decision)
+
+        # Persist to PostgreSQL (single source of truth)
+        if db_session:
+            await self._persist_risk_state_to_db(db_session)
+
+        logger.info(f"🔓 Drawdown lock lock reset by {authorized_by}")
         return True
 
     def _activate_daily_loss_lock(self):
         """Activate the persistent daily loss lock and optionally engage the kill switch."""
         if not self.daily_loss_lock_active:
             self.daily_loss_lock_active = True
-            self._persist_risk_state()
+            # DEPRECATED: JSON write removed — PostgreSQL is canonical (C1 architecture decision)
             logger.critical("🚨 Persistent daily loss lock activated")
             if self.app_state and hasattr(self.app_state, 'daily_loss_lock'):
                 self.app_state.daily_loss_lock = True
@@ -189,7 +272,7 @@ class RiskEngine:
         """Activate the persistent drawdown lock and optionally engage the kill switch."""
         if not self.drawdown_lock_active:
             self.drawdown_lock_active = True
-            self._persist_risk_state()
+            # DEPRECATED: JSON write removed — PostgreSQL is canonical (C1 architecture decision)
             logger.critical("🚨 Persistent drawdown lock activated")
             if self.app_state and hasattr(self.app_state, 'daily_loss_lock'):
                 self.app_state.daily_loss_lock = True
@@ -527,12 +610,11 @@ class RiskEngine:
         if current_date != self.today_date:
             await self.reset_daily_counters()
         
-        # Persist current risk state to disk
-        self._persist_risk_state()
+        # DEPRECATED: JSON write removed — PostgreSQL is canonical (C1 architecture decision)
 
-        # Persist to database if session available
+        # Persist to database if session available (single source of truth)
         if self.db_session:
-            await self._persist_risk_metrics()
+            await self._persist_risk_state_to_db(self.db_session)
         
         logger.info(
             f"📊 Daily P&L updated: ${self.daily_pnl:.2f} ({self.daily_pnl_pct:.2%}), "
@@ -851,8 +933,11 @@ class RiskEngine:
         self.consecutive_losses = 0
         self.last_loss_time = None
         
-        # Persist current risk state to disk
-        self._persist_risk_state()
+        # DEPRECATED: JSON write removed — PostgreSQL is canonical (C1 architecture decision)
+
+        # Persist to database (single source of truth)
+        if self.db_session:
+            await self._persist_risk_state_to_db(self.db_session)
         logger.info(f"📅 Daily counters reset (was {old_date}, now {self.today_date})")
     
     def _calculate_drawdown(self) -> float:

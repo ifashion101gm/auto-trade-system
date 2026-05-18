@@ -1,12 +1,14 @@
 """
-AI Filter - Regime classifier for XAUUSDT signals via OpenRouter.
-
-Uses anthropic/claude-sonnet-4-20250514 through the existing OpenRouterClient
-so all calls benefit from: cost tracking, spend-cap enforcement, provider
-fallback, and the unified LLM gateway already in production.
+AI Filter — XAUUSDT trade signal execution gate (Enterprise v2).
 
 Architecture: Signal → Risk Validation → AI Filter → Execution Gate
-(Risk runs first to avoid wasting tokens on invalid signals)
+(Risk runs first to avoid wasting LLM tokens on already-rejected signals)
+
+v2 changes:
+- System prompt imported from app.llm.prompts (AI_FILTER_SYSTEM)
+- User prompt built via build_ai_filter_context() for richer, compact JSON context
+- Model: claude-haiku-4-5-20251001 (fast, cheap, deterministic JSON)
+- Prompt-cache headers applied automatically via LLMClient
 """
 import asyncio
 import json
@@ -17,6 +19,7 @@ from typing import Dict, Any, Optional
 
 from app.config import settings
 from app.llm.openrouter_client import OpenRouterClient
+from app.llm.prompts import AI_FILTER_SYSTEM, build_ai_filter_context
 from app.strategy.signal_proposal import SignalProposal
 from app.logging_config import get_logger
 
@@ -56,7 +59,7 @@ REGIME_MULTIPLIERS: Dict[Regime, float] = {
 CONFIDENCE_FLOOR   = 0.30
 CONFIDENCE_CEILING = 1.0
 DECAY_K            = 0.15
-AI_TIMEOUT_SECONDS = 1.2
+AI_TIMEOUT_SECONDS = getattr(settings, "AI_FILTER_TIMEOUT_SECONDS", 1.5)
 
 
 class AIFilter:
@@ -92,32 +95,24 @@ class AIFilter:
     # ── Prompt builders ──────────────────────────────────────────────────────
 
     def _build_system_prompt(self) -> str:
-        return (
-            "You classify XAUUSDT market conditions into regimes.\n\n"
-            "Evaluate ONLY:\n"
-            "- Session alignment (is signal appropriate for active session?)\n"
-            "- DXY alignment (is USD strength supporting signal direction?)\n"
-            "- News safety (major economic events within 45min?)\n"
-            "- Liquidity quality (is the liquidity regime solid?)\n"
-            "- Volume confirmation (is volume supporting the move?)\n\n"
-            "Return ONLY valid JSON. No explanations. No reasoning.\n"
-            'Response format: {"regime":"supportive|neutral|hostile|avoid","multiplier":1.1|1.0|0.85|0.0}'
-        )
+        # Enterprise system prompt — imported from prompts.py (static → cached by Anthropic)
+        return AI_FILTER_SYSTEM
 
     def _build_regime_prompt(self, signal: SignalProposal, market_context: Dict[str, Any]) -> str:
-        return json.dumps({
-            "sig":  signal.side.upper(),
-            "conf": round(signal.confidence, 2),
-            "strat": signal.strategy_name,
-            "m": {
-                "s":   self._session_to_code(market_context.get("session")),
-                "d":   self._dxy_trend_to_code(market_context.get("dxy_trend", "flat")),
-                "n":   market_context.get("news_events", 0),
-                "v":   self._volume_to_code(market_context.get("volume_state", "normal")),
-                "l":   market_context.get("liquidity_state", "normal"),
-                "vol": market_context.get("volatility_regime", "stable"),
-            },
-        })
+        # Build compact, structured context using the enterprise template helper
+        news_flag = bool(market_context.get("news_events", 0))
+        return build_ai_filter_context(
+            side=signal.side.upper(),
+            confidence=signal.confidence,
+            strategy=signal.strategy_name,
+            session_code=self._session_to_code(market_context.get("session")),
+            dxy_code=self._dxy_trend_to_code(market_context.get("dxy_trend", "flat")),
+            news_flag=news_flag,
+            volume_code=self._volume_to_code(market_context.get("volume_state", "normal")),
+            liquidity_state=market_context.get("liquidity_state", "normal"),
+            spread_pct=float(market_context.get("spread_pct", 0.05)),
+            vol_regime=market_context.get("volatility_regime", "stable"),
+        )
 
     def _session_to_code(self, session: Optional[str]) -> str:
         return {"london_open": "LO", "london_close": "LC",

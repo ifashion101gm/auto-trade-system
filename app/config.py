@@ -38,6 +38,68 @@ class Settings(BaseSettings):
     # Admin API Key (for enterprise admin routes)
     ADMIN_API_KEY: Optional[str] = None
     
+    def validate_admin_api_key(self):
+        """
+        Validate ADMIN_API_KEY to ensure it's not a placeholder value.
+        Crashes the application if using insecure default values.
+        
+        This enforces a security baseline by preventing the use of 
+        placeholder keys in production environments.
+        """
+        placeholder_values = [
+            'CHANGE_ME_IN_PRODUCTION',
+            'change_me_in_production',
+            'your_admin_api_key_here',
+            'admin123',
+            'test_key',
+            'placeholder',
+            'default_key',
+            'secret',
+            'password',
+            '123456',
+            'admin',
+            'root',
+            'apikey',
+            'api_key',
+            'API_KEY',
+            'ADMIN_API_KEY',
+            'changeme',
+            'dummy',
+            'test',
+            'example',
+            'your-key-here',
+            '',
+            None,
+        ]
+        
+        # Case-insensitive check
+        if self.ADMIN_API_KEY and self.ADMIN_API_KEY.lower() in [v.lower() for v in placeholder_values if v]:
+            raise ValueError(
+                f"SECURITY ERROR: ADMIN_API_KEY is set to an insecure placeholder value: '{self.ADMIN_API_KEY}'. "
+                f"Please set a strong, unique API key in your .env file. "
+                f"Example: ADMIN_API_KEY=$(openssl rand -hex 32)"
+            )
+        
+        # Check for empty/None
+        if not self.ADMIN_API_KEY:
+            raise ValueError(
+                f"SECURITY ERROR: ADMIN_API_KEY is not set or is empty. "
+                f"Please set a strong, unique API key in your .env file. "
+                f"Example: ADMIN_API_KEY=$(openssl rand -hex 32)"
+            )
+        
+        # Additional validation: ensure key has sufficient entropy
+        if len(self.ADMIN_API_KEY) < 16:
+            raise ValueError(
+                f"SECURITY ERROR: ADMIN_API_KEY is too short ({len(self.ADMIN_API_KEY)} characters). "
+                f"Minimum length is 16 characters for security. "
+                f"Use a strong random key: openssl rand -hex 32"
+            )
+    
+    def model_post_init(self):
+        """Called after model initialization - validates security-critical settings."""
+        self.validate_admin_api_key()
+    
     # Binance Trading (Testnet/Mainnet)
     BINANCE_API_KEY: Optional[str] = None
     BINANCE_API_SECRET: Optional[str] = None
@@ -177,9 +239,9 @@ class Settings(BaseSettings):
     DB_WATCHDOG_CHECK_INTERVAL_SEC: int = 60
     
     # Memory Watchdog
-    MEMORY_WATCHDOG_WARNING_THRESHOLD_MB: float = 512
-    MEMORY_WATCHDOG_CRITICAL_THRESHOLD_MB: float = 1024
-    MEMORY_WATCHDOG_GC_TRIGGER_THRESHOLD_MB: float = 768
+    MEMORY_WATCHDOG_WARNING_THRESHOLD_MB: float = 256
+    MEMORY_WATCHDOG_CRITICAL_THRESHOLD_MB: float = 512
+    MEMORY_WATCHDOG_GC_TRIGGER_THRESHOLD_MB: float = 384
     MEMORY_WATCHDOG_CHECK_INTERVAL_SEC: int = 120
     
     # Queue Watchdog
@@ -203,6 +265,7 @@ class Settings(BaseSettings):
     WEBSOCKET_MAX_RECONNECT_ATTEMPTS: int = 0  # 0 = unlimited retries
     WEBSOCKET_STALE_STREAM_THRESHOLD: int = 120  # seconds without data before forcing reconnect
     WEBSOCKET_JITTER_FACTOR: float = 0.1  # 10% jitter to prevent thundering herd
+    WEBSOCKET_STALENESS_THRESHOLD_SECONDS: int = 30  # seconds - skip trading cycle if data is stale
     
     # Circuit Breaker Configuration
     CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
@@ -221,7 +284,8 @@ class Settings(BaseSettings):
     POSITION_CHECK_INTERVAL: float = 5.0  # seconds
     
     # Reconciliation Configuration
-    RECONCILIATION_INTERVAL_SECONDS: int = 120  # Run every 2 minutes (Issue B)
+    RECONCILIATION_INTERVAL_SECONDS: int = 120       # Full deep scan every 2 minutes
+    RECONCILIATION_FAST_INTERVAL_SECONDS: int = 10  # Open-position drift check every 10s
     RECONCILIATION_AUTO_REPAIR_SAFE: bool = True  # Auto-repair safe mismatches
     RECONCILIATION_TELEGRAM_ALERTS: bool = True  # Enable Telegram alerts for critical mismatches
     RECONCILIATION_PROMETHEUS_METRICS: bool = True  # Publish metrics to Prometheus
@@ -235,7 +299,7 @@ class Settings(BaseSettings):
     # Daily loss and drawdown limits
     RISK_MAX_DAILY_LOSS_PCT: float = 0.03  # 3% daily loss limit
     RISK_MAX_DRAWDOWN_PCT: float = 0.15  # 15% max drawdown
-    RISK_STATE_FILE: str = '.risk_state.json'
+    # RISK_STATE_FILE removed - migrated to PostgreSQL (see migrations/versions/006_add_risk_state_table.py)
     KILL_SWITCH_STATE_FILE: str = '.kill_switch_state.json'
     
     # Position sizing and leverage
@@ -281,6 +345,39 @@ class Settings(BaseSettings):
     # Reconciliation
     POSITION_SYNC_INTERVAL: int = 5  # seconds
     EMERGENCY_SYNC_ENABLED: bool = True
+
+    # =========================================================================
+    # Enterprise AI — Model & Prompt Configuration
+    # =========================================================================
+
+    # OpenRouter model IDs for each agent tier
+    # Tier 1 — cheap/fast (routine classification)
+    LLM_MODEL_REGIME: str = "anthropic/claude-haiku-4-5-20251001"
+    # LLM_MODEL_STRATEGY removed - dead code, no strategy agent implemented
+    # Tier 2 — balanced (risk & position sizing)
+    LLM_MODEL_RISK: str = "anthropic/claude-sonnet-4-6"
+    # Tier 3 — premium (escalation judge, high-uncertainty decisions)
+    LLM_MODEL_ESCALATION: str = "anthropic/claude-sonnet-4-6"
+    # AI Filter gate (regime classification for trade signals)
+    LLM_MODEL_AI_FILTER: str = "anthropic/claude-haiku-4-5-20251001"
+
+    # Prompt caching — Anthropic supports cache_control on system prompts
+    LLM_PROMPT_CACHE_ENABLED: bool = True
+
+    # Smart routing thresholds
+    # Escalate to Tier 3 when uncertainty exceeds this value
+    AI_ESCALATION_UNCERTAINTY_THRESHOLD: float = 0.75
+    # Escalate to Tier 3 when PnL drawdown exceeds this value
+    AI_ESCALATION_DRAWDOWN_THRESHOLD: float = 0.04
+
+    # Prompt library version (for change tracking)
+    AI_PROMPTS_VERSION: str = "2.0.0"
+
+    # AI filter timeout — fail fast; fall back to rule-based if LLM is slow
+    AI_FILTER_TIMEOUT_SECONDS: float = 1.5
+
+    # Minimum confidence to pass the AI filter gate
+    AI_FILTER_MIN_CONFIDENCE: float = 0.60
 
     model_config = SettingsConfigDict(
         env_file=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".env"),

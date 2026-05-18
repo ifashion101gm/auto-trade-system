@@ -1,553 +1,652 @@
 """
-OpenRouter LLM Client for AI sub-agents.
-Provides unified access to multiple LLM models via OpenRouter API.
-Maps specific models to sub-agents based on complexity and latency requirements.
+LLM Client — Enterprise v2 (Anthropic Direct).
 
-ENHANCED (Sprint 3):
-- Provider fallback mechanism with automatic failover
-- Cost tracking and spend cap enforcement
-- Three-tier caching (Memory, Redis, Database)
+Provides all AI sub-agent inference using the Anthropic SDK directly.
+Replaces the former OpenRouter gateway while keeping the same public interface.
+
+Model tier strategy (cost vs. performance):
+  T1 claude-haiku-4-5-20251001   — fast, cheap, deterministic JSON classification
+                                   (~$0.80/$4.00 per 1M input/output tokens)
+                                   Used for: regime classification, strategy selection, AI filter
+  T2 claude-sonnet-4-6           — balanced reasoning and quality
+                                   (~$3.00/$15.00 per 1M input/output tokens)
+                                   Used for: risk assessment, smart-routing escalation
+
+Prompt-caching savings (Anthropic ephemeral cache, 5-min TTL):
+  Static system prompts are marked cache_control=ephemeral → ~90 % input-token cost reduction
+  on repeated calls with the same system prompt (applies to Haiku and Sonnet).
+
+Public interface (backward-compatible):
+  classify_regime(system_prompt, user_prompt) → raw JSON str  [AI filter gate]
+  detect_regime(market_data)                  → regime str    [orchestrator]
+  select_strategy(market_data, regime)        → dict          [orchestrator]
+  assess_risk(position, market_data)          → dict          [orchestrator]
+  smart_routing_assessment(...)               → dict          [orchestrator escalation]
+  test_connection()                           → bool
 """
-import httpx
+from __future__ import annotations
+
 import json
 import time
 import hashlib
-from typing import Dict, Any, Optional, List
+import re
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+
+import anthropic
+
 from app.config import settings
 from app.logging_config import get_logger
+from app.llm.prompts import (
+    PROMPTS_VERSION,
+    REGIME_DETECTION_SYSTEM, build_regime_context,
+    STRATEGY_SELECTION_SYSTEM, build_strategy_context,
+    RISK_ASSESSMENT_SYSTEM,
+    AI_FILTER_SYSTEM,
+    SMART_ROUTING_SYSTEM, build_smart_routing_context,
+)
 
 logger = get_logger(__name__)
+
+# ── Model IDs ─────────────────────────────────────────────────────────────────
+_HAIKU = "claude-haiku-4-5-20251001"   # T1: fast / cheap
+_SONNET = "claude-sonnet-4-6"          # T2: balanced quality/cost
+
+# ── Cost estimates per 1M tokens (USD) ────────────────────────────────────────
+_COST_TABLE: Dict[str, Dict[str, float]] = {
+    _HAIKU:  {"input": 0.80,  "output": 4.00,  "cache_write": 1.00, "cache_read": 0.08},
+    _SONNET: {"input": 3.00,  "output": 15.00, "cache_write": 3.75, "cache_read": 0.30},
+}
+
+_JSON_RE = re.compile(r'\{[^{}]+\}', re.DOTALL)
+
+
+def _extract_json(raw: str) -> Optional[Dict[str, Any]]:
+    """Try json.loads; fall back to first {...} block via regex."""
+    try:
+        return json.loads(raw.strip())
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    m = _JSON_RE.search(raw or "")
+    if m:
+        try:
+            return json.loads(m.group())
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return None
 
 
 class OpenRouterClient:
     """
-    OpenRouter API client for LLM inference.
-    
-    Model Mapping Strategy:
-    - Regime Detection: Fast, cheap models (low latency)
-    - Strategy Selection: Balanced performance/cost
-    - Risk Assessment: High accuracy models (complex reasoning)
+    Anthropic-backed LLM client.
+
+    Name kept as OpenRouterClient for backward compatibility with existing imports.
+    Internally uses anthropic.AsyncAnthropic with prompt-cache headers.
     """
-    
-    # Model mapping by agent type - OPTIMIZED FOR COST
-    MODEL_MAPPING = {
-        'regime_classification': {
-            # Regime classifier for AIFilter: deterministic JSON, hard 100-token cap
-            # Uses Claude Sonnet 4 via OpenRouter for consistency with direct-Anthropic baseline
-            'model': 'anthropic/claude-sonnet-4-20250514',
-            'max_tokens': 100,
-            'temperature': 0,
+
+    # ── Tiered model config ───────────────────────────────────────────────────
+    MODEL_MAPPING: Dict[str, Dict[str, Any]] = {
+        # AI filter gate — deterministic JSON, hard 80-token cap
+        "regime_classification": {
+            "model": _HAIKU,
+            "max_tokens": 80,
+            "temperature": 0.0,
         },
-        'regime_detection': {
-            'model': 'openai/gpt-4o-mini',  # Fast, cheap for simple classification
-            'max_tokens': 500,
-            'temperature': 0.1
+        # Regime detection — Tier 1 fast classification
+        "regime_detection": {
+            "model": _HAIKU,
+            "max_tokens": 150,
+            "temperature": 0.0,
         },
-        'strategy_selection': {
-            'model': 'openai/gpt-4o-mini',  # Cost-effective for strategy selection
-            'max_tokens': 1000,
-            'temperature': 0.3
+        # Strategy selection — Tier 1 balanced
+        "strategy_selection": {
+            "model": _HAIKU,
+            "max_tokens": 200,
+            "temperature": 0.1,
         },
-        'risk_assessment': {
-            'model': 'openai/gpt-4o',  # GPT-4o for high accuracy risk assessment (kept)
-            'max_tokens': 1500,
-            'temperature': 0.2
+        # Risk assessment — Tier 2 (position sizing needs careful reasoning)
+        "risk_assessment": {
+            "model": _SONNET,
+            "max_tokens": 300,
+            "temperature": 0.0,
         },
-        # Smart routing models
-        'smart_routing_claude': {
-            'model': 'anthropic/claude-3.5-sonnet',  # Only for high uncertainty
-            'max_tokens': 2000,
-            'temperature': 0.2
+        # Escalation / smart routing — Tier 2 premium
+        "smart_routing": {
+            "model": _SONNET,
+            "max_tokens": 300,
+            "temperature": 0.0,
         },
-        'smart_routing_gpt4o_mini': {
-            'model': 'openai/gpt-4o-mini',  # Default for normal cases
-            'max_tokens': 1000,
-            'temperature': 0.3
-        }
     }
-    
+
     def __init__(self, api_key: Optional[str] = None):
-        """
-        Initialize OpenRouter client.
-        
-        Args:
-            api_key: OpenRouter API key
-        """
-        self.api_key = api_key or settings.OPENROUTER_API_KEY
-        
+        self.api_key = api_key or getattr(settings, "ANTHROPIC_API_KEY", None)
         if not self.api_key:
-            raise ValueError("OpenRouter API key not configured")
-        
-        self.base_url = "https://openrouter.ai/api/v1"
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://auto-trade-system.local",
-            "X-Title": "Auto Trade System"
-        }
-        
-        # Sprint 3: Provider fallback configuration
-        self.fallback_providers = [
-            {'name': 'openrouter', 'url': 'https://openrouter.ai/api/v1', 'priority': 1},
-            {'name': 'direct_openai', 'url': 'https://api.openai.com/v1', 'priority': 2},  # Fallback
-        ]
-        self.current_provider_idx = 0
-        self.provider_failures = {}  # Track failures per provider
-        
-        # Sprint 3: Cost tracking
-        self.daily_spend = 0.0
-        self.weekly_spend = 0.0
-        self.daily_token_count = 0
+            raise ValueError("ANTHROPIC_API_KEY not configured")
+
+        self._client = anthropic.AsyncAnthropic(api_key=self.api_key)
+
+        # Cost / spend tracking
+        self.daily_spend: float = 0.0
+        self.weekly_spend: float = 0.0
+        self.daily_token_count: int = 0
         self.last_reset_date = datetime.now(timezone.utc).date()
         self.spend_limits = {
-            'daily': getattr(settings, 'LLM_DAILY_SPEND_LIMIT', 10.0),  # $10 default
-            'weekly': getattr(settings, 'LLM_WEEKLY_SPEND_LIMIT', 50.0)  # $50 default
+            "daily":  getattr(settings, "LLM_DAILY_SPEND_LIMIT",  10.0),
+            "weekly": getattr(settings, "LLM_WEEKLY_SPEND_LIMIT", 50.0),
         }
-        self.cost_per_1k_tokens = {
-            'gpt-4o-mini': 0.00015,  # $0.15 per 1M tokens
-            'gpt-4o': 0.0025,  # $2.50 per 1M tokens
-            'claude-3.5-sonnet': 0.003  # $3.00 per 1M tokens
-        }
-        
-        # Sprint 3: L1 Cache (Memory)
-        self._l1_cache = {}  # {cache_key: {'data': ..., 'expires_at': ...}}
-        self._l1_cache_ttl = 60  # 60 seconds for market data
-        
-        logger.info("✅ OpenRouter Client initialized with Sprint 3 enhancements")
-        logger.info(f"   Daily spend limit: ${self.spend_limits['daily']:.2f}")
-        logger.info(f"   Weekly spend limit: ${self.spend_limits['weekly']:.2f}")
-    
-    async def _make_request(
+
+        # L1 in-process cache (market data can repeat within 60 s)
+        self._l1_cache: Dict[str, Dict[str, Any]] = {}
+        self._l1_cache_ttl: int = 60
+
+        # Prompt caching toggle (Anthropic ephemeral cache)
+        self._prompt_cache_enabled: bool = getattr(
+            settings, "LLM_PROMPT_CACHE_ENABLED", True
+        )
+
+        logger.info(
+            "✅ Anthropic LLM client ready | prompts_v=%s haiku=%s sonnet=%s cache=%s",
+            PROMPTS_VERSION, _HAIKU, _SONNET, self._prompt_cache_enabled,
+        )
+
+    # ── Core request ──────────────────────────────────────────────────────────
+
+    async def _call(
         self,
         model: str,
-        messages: List[Dict[str, str]],
-        max_tokens: int = 1000,
-        temperature: float = 0.3
-    ) -> Dict[str, Any]:
+        system_prompt: str,
+        user_content: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
         """
-        Make request to OpenRouter API.
-        
-        Args:
-            model: Model identifier
-            messages: Chat messages
-            max_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
-            
-        Returns:
-            Response data
+        Call Anthropic Messages API with optional prompt-cache headers.
+
+        Returns the raw text of the first content block.
+        Raises on non-retriable API errors.
         """
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self.headers,
-                json=payload
+        self._reset_daily_counters_if_needed()
+
+        # Build system block with optional cache_control
+        system_block: Any
+        if self._prompt_cache_enabled:
+            system_block = [
+                {
+                    "type": "text",
+                    "text": system_prompt,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        else:
+            system_block = system_prompt
+
+        response = await self._client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system=system_block,
+            messages=[{"role": "user", "content": user_content}],
+        )
+
+        # Update cost tracking
+        self._track_usage(model, response.usage)
+
+        return response.content[0].text if response.content else ""
+
+    def _reset_daily_counters_if_needed(self) -> None:
+        today = datetime.now(timezone.utc).date()
+        if today != self.last_reset_date:
+            logger.info(
+                "LLM cost reset: daily=$%.4f tokens=%d",
+                self.daily_spend, self.daily_token_count,
             )
-            
-            if response.status_code != 200:
-                raise Exception(f"OpenRouter API error: {response.status_code} - {response.text}")
-            
-            result = response.json()
-            
-            # Track token usage if available in response
+            self.daily_spend = 0.0
+            self.daily_token_count = 0
+            self.last_reset_date = today
+
+    def _track_usage(self, model: str, usage: Any) -> None:
+        try:
+            costs = _COST_TABLE.get(model, {})
+            input_tokens = getattr(usage, "input_tokens", 0) or 0
+            output_tokens = getattr(usage, "output_tokens", 0) or 0
+            cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+
+            cost = (
+                (input_tokens / 1_000_000) * costs.get("input", 0)
+                + (output_tokens / 1_000_000) * costs.get("output", 0)
+                + (cache_creation / 1_000_000) * costs.get("cache_write", 0)
+                + (cache_read / 1_000_000) * costs.get("cache_read", 0)
+            )
+            self.daily_spend += cost
+            self.weekly_spend += cost
+            self.daily_token_count += input_tokens + output_tokens
+
             try:
-                usage = result.get('usage', {})
-                if usage:
-                    prompt_tokens = usage.get('prompt_tokens', 0)
-                    completion_tokens = usage.get('completion_tokens', 0)
-                    total_tokens = usage.get('total_tokens', 0)
-                    
-                    # Update Prometheus metrics
-                    try:
-                        from app.main import LLM_TOKEN_USAGE_TOTAL
-                        if LLM_TOKEN_USAGE_TOTAL:
-                            # Extract provider and model name for labels
-                            provider = model.split('/')[0] if '/' in model else 'unknown'
-                            model_name = model.split('/')[-1] if '/' in model else model
-                            LLM_TOKEN_USAGE_TOTAL.labels(
-                                provider=provider,
-                                model=model_name
-                            ).inc(total_tokens)
-                            logger.debug(f"LLM token usage tracked: {total_tokens} tokens for {model}")
-                    except ImportError:
-                        pass  # Metrics not available
-                    
-                    # Update internal counters
-                    self.daily_token_count += total_tokens
-            except Exception as e:
-                logger.debug(f"Failed to track token usage: {e}")
-            
-            return result
-    
+                from app.main import LLM_TOKEN_USAGE_TOTAL
+                if LLM_TOKEN_USAGE_TOTAL:
+                    provider, model_name = "anthropic", model
+                    LLM_TOKEN_USAGE_TOTAL.labels(
+                        provider=provider, model=model_name
+                    ).inc(input_tokens + output_tokens)
+            except ImportError:
+                pass
+        except Exception as exc:
+            logger.debug("Usage tracking error: %s", exc)
+
+    # ── L1 cache helpers ──────────────────────────────────────────────────────
+
+    def _cache_key(self, prefix: str, data: Any) -> str:
+        return hashlib.md5(f"{prefix}:{json.dumps(data, sort_keys=True)}".encode()).hexdigest()
+
+    def _l1_get(self, key: str) -> Optional[Any]:
+        entry = self._l1_cache.get(key)
+        if entry and time.time() < entry["expires_at"]:
+            return entry["data"]
+        return None
+
+    def _l1_put(self, key: str, data: Any) -> None:
+        self._l1_cache[key] = {"data": data, "expires_at": time.time() + self._l1_cache_ttl}
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PUBLIC INTERFACE
+    # ─────────────────────────────────────────────────────────────────────────
+
     async def classify_regime(self, system_prompt: str, user_prompt: str) -> str:
         """
-        Classify XAUUSDT market regime via OpenRouter.
+        AI Filter gate — classify XAUUSDT market regime from a trade signal context.
 
-        Used by AIFilter as a drop-in replacement for the direct Anthropic SDK call.
+        Called by AIFilter with its own pre-built prompts from prompts.py.
         Returns raw JSON string e.g. '{"regime":"neutral","multiplier":1.0}'.
-        Falls back to neutral JSON on any error.
+        Falls back to neutral on any error.
         """
-        config = self.MODEL_MAPPING['regime_classification']
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_prompt},
-        ]
+        cfg = self.MODEL_MAPPING["regime_classification"]
         try:
-            result = await self._make_request(
-                model=config['model'],
-                messages=messages,
-                max_tokens=config['max_tokens'],
-                temperature=config['temperature'],
+            raw = await self._call(
+                model=cfg["model"],
+                system_prompt=system_prompt,
+                user_content=user_prompt,
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
             )
-            return result['choices'][0]['message']['content'].strip()
-        except Exception as e:
-            logger.warning("OpenRouter regime_classification failed: %s", e)
+            logger.debug("classify_regime raw: %s", raw[:120])
+            return raw.strip()
+        except Exception as exc:
+            logger.warning("classify_regime failed: %s — returning neutral fallback", exc)
             return '{"regime":"neutral","multiplier":1.0}'
 
     async def detect_regime(self, market_data: Dict[str, Any]) -> str:
         """
-        Detect market regime using fast LLM.
-        
-        Args:
-            market_data: Market indicators
-            
-        Returns:
-            Regime classification: 'Low-vol', 'Normal', or 'High-vol'
+        Classify XAUUSDT market regime from indicator snapshot.
+
+        Returns one of: low_vol_range | low_vol_trending | normal |
+        normal_trending | high_vol_breakout | high_vol_reversal | avoid
         """
-        config = self.MODEL_MAPPING['regime_detection']
-        
-        prompt = f"""
-Analyze the following market data and classify the current regime:
+        cache_key = self._cache_key("regime", market_data)
+        if (cached := self._l1_get(cache_key)) is not None:
+            return cached
 
-Market Data:
-- Current Price: ${market_data.get('current_price', 'N/A')}
-- Volatility: {market_data.get('volatility', 'N/A')}
-- Volume (24h): {market_data.get('volume_24h', 'N/A')}
-- Price Change (24h): {market_data.get('price_change_24h', 'N/A')}%
+        cfg = self.MODEL_MAPPING["regime_detection"]
+        user_prompt = build_regime_context(market_data)
 
-Classify into one of three regimes:
-1. Low-vol: Low volatility, stable prices, low volume
-2. Normal: Moderate volatility, typical trading patterns
-3. High-vol: High volatility, rapid price movements, high volume
+        _VALID = {
+            "low_vol_range", "low_vol_trending", "normal", "normal_trending",
+            "high_vol_breakout", "high_vol_reversal", "avoid",
+        }
 
-Respond with ONLY the regime name (Low-vol, Normal, or High-vol).
-"""
-        
-        messages = [
-            {"role": "system", "content": "You are a market regime detection expert."},
-            {"role": "user", "content": prompt}
-        ]
-        
         try:
-            result = await self._make_request(
-                model=config['model'],
-                messages=messages,
-                max_tokens=config['max_tokens'],
-                temperature=config['temperature']
+            raw = await self._call(
+                model=cfg["model"],
+                system_prompt=REGIME_DETECTION_SYSTEM,
+                user_content=user_prompt,
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
             )
-            
-            regime = result['choices'][0]['message']['content'].strip()
-            
-            # Validate response
-            valid_regimes = ['Low-vol', 'Normal', 'High-vol']
-            if regime not in valid_regimes:
-                # Try to extract valid regime from response
-                for valid in valid_regimes:
-                    if valid.lower() in regime.lower():
-                        return valid
-                return 'Normal'  # Default fallback
-            
-            return regime
-            
-        except Exception as e:
-            print(f"⚠️  OpenRouter regime detection failed: {e}")
-            # Fallback to heuristic
-            volatility = market_data.get('volatility', 0.5)
-            if volatility < 0.3:
-                return "Low-vol"
-            elif volatility > 0.7:
-                return "High-vol"
+            parsed = _extract_json(raw)
+            if parsed:
+                regime = str(parsed.get("regime", "normal")).lower()
             else:
-                return "Normal"
-    
-    async def select_strategy(self, market_data: Dict[str, Any], regime: str = "Normal") -> Dict[str, Any]:
+                # Try plain text fallback
+                regime = raw.strip().lower().split()[0] if raw.strip() else "normal"
+
+            if regime not in _VALID:
+                # Partial match
+                for v in _VALID:
+                    if v in regime:
+                        regime = v
+                        break
+                else:
+                    regime = "normal"
+
+            self._l1_put(cache_key, regime)
+            logger.info("detect_regime → %s", regime)
+            return regime
+
+        except Exception as exc:
+            logger.warning("detect_regime failed: %s — heuristic fallback", exc)
+            return self._heuristic_regime(market_data)
+
+    async def select_strategy(
+        self,
+        market_data: Dict[str, Any],
+        regime: str = "normal",
+    ) -> Dict[str, Any]:
         """
-        Select optimal trading strategy using balanced LLM.
-        
-        Args:
-            market_data: Market indicators
-            regime: Current market regime
-            
-        Returns:
-            Strategy selection with confidence and parameters
+        Select the optimal XAUUSDT trading strategy for the current regime.
+
+        Returns dict with: strategy, confidence, entry_timing, stop_atr_mult,
+        rr_ratio, leverage_cap, signal_side, rationale.
         """
-        config = self.MODEL_MAPPING['strategy_selection']
-        
-        prompt = f"""
-Based on the market conditions, select the optimal trading strategy.
+        _VALID = {
+            "gold_opening_reversal", "gold_breakout", "gold_momentum",
+            "gold_mean_reversion", "no_trade",
+        }
+        cfg = self.MODEL_MAPPING["strategy_selection"]
+        user_prompt = build_strategy_context(market_data, regime=regime)
 
-Market Regime: {regime}
-
-Market Data:
-- Symbol: {market_data.get('symbol', 'BTC/USDT')}
-- Current Price: ${market_data.get('current_price', 'N/A')}
-- RSI: {market_data.get('rsi', 'N/A')}
-- MACD: {market_data.get('macd', 'N/A')}
-- Moving Average (20): {market_data.get('ma_20', 'N/A')}
-- Moving Average (50): {market_data.get('ma_50', 'N/A')}
-
-Available Strategies:
-1. momentum: Follow strong price trends (best in Normal/High-vol)
-2. mean_reversion: Trade price reversals (best in Low-vol)
-3. breakout: Trade breakouts from consolidation (best in Low-vol → Normal transitions)
-
-Select ONE strategy and provide:
-- strategy: strategy name
-- confidence: confidence score (0.0 to 1.0)
-- reason: brief explanation
-
-Respond in JSON format only.
-"""
-        
-        messages = [
-            {"role": "system", "content": "You are a trading strategy expert. Respond in JSON format only."},
-            {"role": "user", "content": prompt}
-        ]
-        
         try:
-            result = await self._make_request(
-                model=config['model'],
-                messages=messages,
-                max_tokens=config['max_tokens'],
-                temperature=config['temperature']
+            raw = await self._call(
+                model=cfg["model"],
+                system_prompt=STRATEGY_SELECTION_SYSTEM,
+                user_content=user_prompt,
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
             )
-            
-            content = result['choices'][0]['message']['content'].strip()
-            
-            # Parse JSON response
-            try:
-                strategy_data = json.loads(content)
-            except json.JSONDecodeError:
-                # Fallback parsing
-                strategy_data = {
-                    'strategy': 'momentum',
-                    'confidence': 0.7,
-                    'reason': 'Fallback selection'
-                }
-            
-            # Ensure required fields
-            strategy_data.setdefault('strategy', 'momentum')
-            strategy_data.setdefault('confidence', 0.5)
-            strategy_data.setdefault('parameters', {})
-            
-            return strategy_data
-            
-        except Exception as e:
-            print(f"⚠️  OpenRouter strategy selection failed: {e}")
-            # Fallback to heuristic
-            return {
-                'strategy': 'momentum',
-                'confidence': 0.6,
-                'parameters': {'lookback_period': 20, 'threshold': 0.02}
+            parsed = _extract_json(raw)
+            if not parsed:
+                raise ValueError(f"JSON parse failed: {raw[:80]!r}")
+
+            strategy = str(parsed.get("strategy", "gold_momentum"))
+            if strategy not in _VALID:
+                strategy = "gold_momentum"
+
+            result = {
+                "strategy":      strategy,
+                "confidence":    float(parsed.get("confidence", 0.65)),
+                "entry_timing":  parsed.get("entry_timing", "immediate"),
+                "stop_atr_mult": float(parsed.get("stop_atr_mult", 1.5)),
+                "rr_ratio":      float(parsed.get("rr_ratio", 2.0)),
+                "leverage_cap":  int(parsed.get("leverage_cap", 3)),
+                "signal_side":   parsed.get("signal_side", "neutral"),
+                "rationale":     parsed.get("rationale", ""),
+                "parameters":    {},
             }
-    
-    async def assess_risk(self, position: Dict[str, Any], market_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Assess risk for proposed position using high-accuracy LLM.
-        
-        Args:
-            position: Proposed trade details
-            market_data: Optional market context
-            
-        Returns:
-            Risk assessment with recommendations
-        """
-        config = self.MODEL_MAPPING['risk_assessment']
-        
-        prompt = f"""
-Assess the risk for the following proposed trade position.
-
-Proposed Position:
-- Strategy: {position.get('strategy', 'N/A')}
-- Side: {position.get('side', 'N/A')}
-- Entry Price: ${position.get('entry_price', 'N/A')}
-- Confidence: {position.get('confidence', 'N/A')}
-
-Market Context:
-{json.dumps(market_data, indent=2) if market_data else 'Not provided'}
-
-Provide risk assessment with:
-- risk_level: 'low', 'medium', or 'high'
-- max_position_size: maximum position size in USD
-- stop_loss: stop-loss percentage (e.g., 0.02 for 2%)
-- leverage_recommendation: recommended leverage (1-10)
-- reasoning: brief explanation
-
-Respond in JSON format only.
-"""
-        
-        messages = [
-            {"role": "system", "content": "You are a risk management expert. Respond in JSON format only."},
-            {"role": "user", "content": prompt}
-        ]
-        
-        try:
-            result = await self._make_request(
-                model=config['model'],
-                messages=messages,
-                max_tokens=config['max_tokens'],
-                temperature=config['temperature']
+            logger.info(
+                "select_strategy → %s (conf=%.2f side=%s)",
+                result["strategy"], result["confidence"], result["signal_side"],
             )
-            
-            content = result['choices'][0]['message']['content'].strip()
-            
-            # Parse JSON response
-            try:
-                risk_data = json.loads(content)
-            except json.JSONDecodeError:
-                # Fallback parsing
-                risk_data = {
-                    'risk_level': 'medium',
-                    'max_position_size': 1000,
-                    'stop_loss': 0.02,
-                    'leverage_recommendation': 2
-                }
-            
-            # Ensure required fields
-            risk_data.setdefault('risk_level', 'medium')
-            risk_data.setdefault('max_position_size', 1000)
-            risk_data.setdefault('stop_loss', 0.02)
-            risk_data.setdefault('leverage_recommendation', 2)
-            
-            return risk_data
-            
-        except Exception as e:
-            print(f"⚠️  OpenRouter risk assessment failed: {e}")
-            # Fallback to heuristic
-            return {
-                'risk_level': 'medium',
-                'max_position_size': 1000,
-                'stop_loss': 0.02,
-                'leverage_recommendation': 2
+            return result
+
+        except Exception as exc:
+            logger.warning("select_strategy failed: %s — heuristic fallback", exc)
+            return self._heuristic_strategy(regime)
+
+    async def assess_risk(
+        self,
+        position: Dict[str, Any],
+        market_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Assess risk for a proposed XAUUSDT position.
+
+        Derives account state from position dict; uses Sonnet for careful
+        Kelly-adjacent position sizing.
+        """
+        cfg = self.MODEL_MAPPING["risk_assessment"]
+
+        indicators = (market_data or {}).get("indicators", {})
+        price = float(
+            (market_data or {}).get("price", position.get("entry_price", 2000)) or 2000
+        )
+        atr = float(indicators.get("atr", price * 0.001) or price * 0.001)
+
+        user_prompt = build_risk_context(
+            balance=float(position.get("account_balance", 500.0)),
+            daily_pnl_pct=float(position.get("daily_pnl_pct", 0.0)),
+            drawdown_pct=float(position.get("drawdown_pct", 0.0)),
+            consec_losses=int(position.get("consecutive_losses", 0)),
+            open_positions=int(position.get("open_positions", 0)),
+            side=str(position.get("side", "long")),
+            strategy=str(position.get("strategy", "gold_opening_reversal")),
+            entry_price=price,
+            confidence=float(position.get("confidence", 0.65)),
+            stop_atr_mult=float(position.get("stop_atr_mult", 1.5)),
+            rr_ratio=float(position.get("rr_ratio", 2.0)),
+            atr=atr,
+            spread_pct=float((market_data or {}).get("spread_pct", 0.05)),
+            session=str((market_data or {}).get("session", "unknown")),
+            regime=str((market_data or {}).get("regime", "normal")),
+            volatility_pct=float(indicators.get("atr_pct", atr / price * 100)),
+        )
+
+        try:
+            raw = await self._call(
+                model=cfg["model"],
+                system_prompt=RISK_ASSESSMENT_SYSTEM,
+                user_content=user_prompt,
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
+            )
+            parsed = _extract_json(raw)
+            if not parsed:
+                raise ValueError(f"JSON parse failed: {raw[:80]!r}")
+
+            approved = bool(parsed.get("approved", True))
+            risk_score = int(parsed.get("risk_score", 40))
+            if risk_score > 80:
+                approved = False
+
+            result = {
+                "approved":             approved,
+                "risk_score":           risk_score,
+                "risk_level":           self._risk_level_from_score(risk_score),
+                "position_notional_usd": float(parsed.get("position_notional_usd", 50.0)),
+                "max_position_size":     float(parsed.get("position_notional_usd", 50.0)),
+                "contracts":            float(parsed.get("contracts", 0.0)),
+                "stop_loss":            float(parsed.get("stop_loss_pct", 0.02)),
+                "stop_loss_pct":        float(parsed.get("stop_loss_pct", 0.02)),
+                "take_profit_pct":      float(parsed.get("take_profit_pct", 0.04)),
+                "leverage":             int(parsed.get("leverage", 2)),
+                "leverage_recommendation": int(parsed.get("leverage", 2)),
+                "reject_reason":        parsed.get("reject_reason", ""),
+                "sizing_notes":         parsed.get("sizing_notes", ""),
             }
-    
-    async def test_connection(self) -> bool:
-        """
-        Test OpenRouter API connection.
-        
-        Returns:
-            True if connection successful
-        """
-        try:
-            # Simple test request using cost-effective model
-            result = await self._make_request(
-                model='openai/gpt-4o-mini',
-                messages=[{"role": "user", "content": "Say 'OK'"}],
-                max_tokens=10,
-                temperature=0.1
+            logger.info(
+                "assess_risk → approved=%s score=%d notional=$%.2f",
+                result["approved"], result["risk_score"], result["position_notional_usd"],
             )
-            
-            return True
-        except Exception as e:
-            print(f"❌ OpenRouter connection test failed: {e}")
-            return False
-    
+            return result
+
+        except Exception as exc:
+            logger.warning("assess_risk failed: %s — heuristic fallback", exc)
+            return {
+                "approved": True,
+                "risk_score": 40,
+                "risk_level": "medium",
+                "position_notional_usd": 50.0,
+                "max_position_size": 50.0,
+                "contracts": 0.0,
+                "stop_loss": 0.02,
+                "stop_loss_pct": 0.02,
+                "take_profit_pct": 0.04,
+                "leverage": 2,
+                "leverage_recommendation": 2,
+                "reject_reason": "",
+                "sizing_notes": "heuristic fallback",
+            }
+
     async def smart_routing_assessment(
         self,
         market_data: Dict[str, Any],
         uncertainty_score: float,
         pnl_drawdown: float,
-        drawdown_threshold: float = 0.05
+        drawdown_threshold: float = 0.05,
     ) -> Dict[str, Any]:
         """
-        Smart routing: Use Claude only when needed, otherwise use GPT-4o-mini.
-        
-        Args:
-            market_data: Current market conditions
-            uncertainty_score: Model uncertainty (0-1)
-            pnl_drawdown: Current P&L drawdown percentage
-            drawdown_threshold: Threshold to trigger Claude usage
-            
-        Returns:
-            Decision with selected model and reasoning
+        Escalation judge — called only when lower-tier agents disagree or
+        uncertainty / drawdown crosses the configured threshold.
+
+        Returns action dict with: action, confidence, position_size_usd,
+        stop_loss_pct, tp_pct, reasoning, model_used.
         """
-        # Determine which model to use based on conditions
-        if uncertainty_score > 0.75 or pnl_drawdown > drawdown_threshold:
-            # High uncertainty or significant drawdown - use Claude
-            config = self.MODEL_MAPPING['smart_routing_claude']
-            model_type = 'claude'
-            reason = f"High uncertainty ({uncertainty_score:.2f}) or drawdown ({pnl_drawdown:.2%})"
-        else:
-            # Normal conditions - use GPT-4o-mini for cost savings
-            config = self.MODEL_MAPPING['smart_routing_gpt4o_mini']
-            model_type = 'gpt-4o-mini'
-            reason = f"Normal conditions (uncertainty: {uncertainty_score:.2f}, drawdown: {pnl_drawdown:.2%})"
-        
-        prompt = f"""
-Provide trading decision based on market conditions.
+        cfg = self.MODEL_MAPPING["smart_routing"]
+        indicators = market_data.get("indicators", {})
+        price = float(market_data.get("price", market_data.get("current_price", 2000)) or 2000)
 
-Market Data:
-{json.dumps(market_data, indent=2)}
+        escalation_threshold = getattr(
+            settings, "AI_ESCALATION_UNCERTAINTY_THRESHOLD", 0.75
+        )
+        should_escalate = (
+            uncertainty_score > escalation_threshold
+            or pnl_drawdown > drawdown_threshold
+        )
+        reason = (
+            f"uncertainty={uncertainty_score:.2f} drawdown={pnl_drawdown:.2%}"
+            if should_escalate
+            else "routine_check"
+        )
 
-Uncertainty Score: {uncertainty_score}
-P&L Drawdown: {pnl_drawdown:.2%}
+        user_prompt = build_smart_routing_context(
+            reason=reason,
+            uncertainty=uncertainty_score,
+            balance=float(market_data.get("account_balance", 500.0)),
+            drawdown_pct=pnl_drawdown,
+            consec_losses=int(market_data.get("consecutive_losses", 0)),
+            price=price,
+            session=str(market_data.get("session", "unknown")),
+            regime=str(market_data.get("regime", "normal")),
+            strategy=str(market_data.get("strategy", "unknown")),
+            atr=float(indicators.get("atr", price * 0.001)),
+            rsi=float(indicators.get("rsi", 50.0)),
+            adx=float(indicators.get("adx", 20.0)),
+        )
 
-Provide:
-- action: 'BUY', 'SELL', or 'HOLD'
-- confidence: 0.0 to 1.0
-- position_size_usd: recommended position size
-- stop_loss_pct: stop loss percentage
-- reasoning: brief explanation
-
-Respond in JSON format only.
-"""
-        
-        messages = [
-            {"role": "system", "content": "You are a trading decision expert. Respond in JSON format only."},
-            {"role": "user", "content": prompt}
-        ]
-        
         try:
-            result = await self._make_request(
-                model=config['model'],
-                messages=messages,
-                max_tokens=config['max_tokens'],
-                temperature=config['temperature']
+            raw = await self._call(
+                model=cfg["model"],
+                system_prompt=SMART_ROUTING_SYSTEM,
+                user_content=user_prompt,
+                max_tokens=cfg["max_tokens"],
+                temperature=cfg["temperature"],
             )
-            
-            content = result['choices'][0]['message']['content'].strip()
-            
-            try:
-                decision = json.loads(content)
-            except json.JSONDecodeError:
-                decision = {
-                    'action': 'HOLD',
-                    'confidence': 0.5,
-                    'position_size_usd': 500,
-                    'stop_loss_pct': 0.02,
-                    'reasoning': 'Fallback decision'
-                }
-            
-            decision['model_used'] = model_type
-            decision['routing_reason'] = reason
-            
-            return decision
-            
-        except Exception as e:
-            print(f"⚠️  Smart routing assessment failed: {e}")
-            return {
-                'action': 'HOLD',
-                'confidence': 0.5,
-                'position_size_usd': 500,
-                'stop_loss_pct': 0.02,
-                'reasoning': f'Error: {str(e)}',
-                'model_used': 'fallback',
-                'routing_reason': 'Error fallback'
+            parsed = _extract_json(raw)
+            if not parsed:
+                raise ValueError(f"JSON parse failed: {raw[:80]!r}")
+
+            action = str(parsed.get("action", "HOLD")).upper()
+            if action not in {"BUY", "SELL", "HOLD"}:
+                action = "HOLD"
+
+            result = {
+                "action":           action,
+                "confidence":       float(parsed.get("confidence", 0.5)),
+                "position_size_usd": float(parsed.get("position_size_usd", 50.0)),
+                "stop_loss_pct":    float(parsed.get("stop_loss_pct", 0.02)),
+                "tp_pct":           float(parsed.get("tp_pct", 0.04)),
+                "reasoning":        parsed.get("reasoning", ""),
+                "model_used":       cfg["model"],
+                "escalated":        should_escalate,
             }
+            logger.info(
+                "smart_routing → %s (conf=%.2f escalated=%s)",
+                action, result["confidence"], should_escalate,
+            )
+            return result
+
+        except Exception as exc:
+            logger.warning("smart_routing_assessment failed: %s — HOLD fallback", exc)
+            return {
+                "action": "HOLD",
+                "confidence": 0.5,
+                "position_size_usd": 50.0,
+                "stop_loss_pct": 0.02,
+                "tp_pct": 0.04,
+                "reasoning": f"error fallback: {exc}",
+                "model_used": "fallback",
+                "escalated": False,
+            }
+
+    async def test_connection(self) -> bool:
+        """Ping Anthropic API with a minimal request."""
+        try:
+            await self._client.messages.create(
+                model=_HAIKU,
+                max_tokens=5,
+                messages=[{"role": "user", "content": "ping"}],
+            )
+            logger.info("✅ Anthropic API connection OK")
+            return True
+        except Exception as exc:
+            logger.error("❌ Anthropic API connection failed: %s", exc)
+            return False
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Heuristic fallbacks (no LLM)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _heuristic_regime(self, market_data: Dict[str, Any]) -> str:
+        indicators = market_data.get("indicators", {})
+        price = float(market_data.get("price", 1) or 1)
+        atr = float(indicators.get("atr", 0) or 0)
+        atr_pct = (atr / price * 100) if price > 0 else 0.0
+        adx = float(indicators.get("adx", 20) or 20)
+        rsi = float(indicators.get("rsi", 50) or 50)
+
+        if market_data.get("news_events", 0) or market_data.get("spread_pct", 0.05) > 0.15:
+            return "avoid"
+        if atr_pct > 0.18 and (rsi >= 72 or rsi <= 28):
+            return "high_vol_reversal"
+        if atr_pct > 0.18:
+            return "high_vol_breakout"
+        if atr_pct < 0.08:
+            return "low_vol_trending" if adx > 22 else "low_vol_range"
+        if adx > 28:
+            return "normal_trending"
+        return "normal"
+
+    def _heuristic_strategy(self, regime: str) -> Dict[str, Any]:
+        _MAP = {
+            "low_vol_range":      "gold_mean_reversion",
+            "low_vol_trending":   "gold_momentum",
+            "normal":             "gold_momentum",
+            "normal_trending":    "gold_momentum",
+            "high_vol_breakout":  "gold_breakout",
+            "high_vol_reversal":  "gold_opening_reversal",
+            "avoid":              "no_trade",
+        }
+        return {
+            "strategy":      _MAP.get(regime, "gold_momentum"),
+            "confidence":    0.60,
+            "entry_timing":  "immediate",
+            "stop_atr_mult": 1.5,
+            "rr_ratio":      2.0,
+            "leverage_cap":  3,
+            "signal_side":   "neutral",
+            "rationale":     "heuristic fallback",
+            "parameters":    {},
+        }
+
+    @staticmethod
+    def _risk_level_from_score(score: int) -> str:
+        if score <= 30:
+            return "low"
+        if score <= 60:
+            return "medium"
+        if score <= 80:
+            return "high"
+        return "critical"
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Spend / status helpers (kept for dashboard compatibility)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    @property
+    def spend_status(self) -> Dict[str, Any]:
+        return {
+            "daily_spend": round(self.daily_spend, 6),
+            "weekly_spend": round(self.weekly_spend, 6),
+            "daily_limit": self.spend_limits["daily"],
+            "weekly_limit": self.spend_limits["weekly"],
+            "daily_tokens": self.daily_token_count,
+            "prompts_version": PROMPTS_VERSION,
+        }

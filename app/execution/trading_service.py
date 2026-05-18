@@ -16,6 +16,7 @@ from app.config import settings
 from app.ai_agents.orchestrator import AIAgentOrchestrator
 from app.infra.exchange_manager import UnifiedExchangeManager
 from app.infra.hybrid_exchange_manager import HybridExchangeManager
+from app.infra.smart_order_router import SmartOrderRouter, OrderType
 from app.notifications.notifier import TelegramNotifier
 from app.risk.validator import TradeValidator
 from app.risk.risk_engine import RiskEngine
@@ -29,8 +30,15 @@ from app.events.event_bus import event_bus
 from app.execution.self_healing_engine import SelfHealingExecutionEngine
 from app.analytics.daily_ai_report import DailyAIReport
 from app.self_healing.watchdogs import QueueWatchdog
+from app.runtime.news_guard import NewsGuard
 
 logger = get_logger(__name__)
+
+# C3: Module-level inference cache — survives per-request LiveTradingService instantiation.
+# Regime + strategy are pre-computed by the background loop; hot path reads from here.
+_SHARED_INFERENCE_CACHE: Dict[str, Any] = {}
+_INFERENCE_CACHE_TTL: int = 20        # seconds before cache is considered stale
+_INFERENCE_BACKGROUND_STARTED: bool = False  # guard: only one background task per process
 
 # Resilience Platform imports (Phase 3) - Lazy import to avoid circular dependency
 RESILIENCE_PLATFORM_AVAILABLE = False
@@ -81,10 +89,8 @@ class LiveTradingService:
         
         # Initialize components
         self.orchestrator = AIAgentOrchestrator(use_openrouter=use_openrouter)
-        self.exchange_manager = UnifiedExchangeManager(
-            exchange_name=self.exchange_name,
-            use_testnet=self.use_testnet
-        )
+        self.router = SmartOrderRouter.build_with_secondary()
+        self.exchange_manager = self.router  # alias: reads + CLOSE orders go through router
         self.notifier = TelegramNotifier()
         self.validator = TradeValidator()
         self.param_cache = LearningParameterCache()
@@ -112,7 +118,21 @@ class LiveTradingService:
         # Initialize risk engine and circuit breaker
         self.risk_engine = RiskEngine(db_session=None)  # Will be set per request
         self.circuit_breaker = SystemCircuitBreaker(notifier=self.notifier)
-        
+
+        # News guard — halts cycle during high-impact macro events (CPI, NFP, FOMC)
+        self.news_guard = NewsGuard()
+
+        # Optional: WebSocket manager injected by main.py for stale-feed detection
+        self.websocket_manager = None
+
+        # C3: LLM inference cache — points at module-level dict so cache survives
+        # across per-request instantiations of LiveTradingService
+        self._inference_cache = _SHARED_INFERENCE_CACHE
+        self._inference_cache_ttl = _INFERENCE_CACHE_TTL
+
+        # Shutdown flag for background task cancellation
+        self._shutdown: bool = False
+
         # State machine tracking
         self.current_state = ExecutionState.IDLE
         self.state_history: List[Tuple[ExecutionState, datetime]] = []
@@ -400,10 +420,22 @@ class LiveTradingService:
                 results['health_issues'] = health_decision.issues
                 results['self_healing'] = health_decision.to_dict()
                 return results
-            
+
+            # L2: News guard — halt before data fetch if macro event active (C4 architecture decision)
+            if self.news_guard.is_trading_safe() is False:
+                logger.info("📰 News guard active — skipping cycle (high-impact event window)")
+                results['status'] = 'skipped_news_guard'
+                return results
+
+            # L1: Stale WebSocket feed guard — halt if price data is >30s old (C2 architecture decision)
+            if self.websocket_manager and self.websocket_manager.is_data_stale(threshold_seconds=30):
+                logger.warning("🔌 Stale WebSocket feed >30s — skipping cycle for %s", symbol)
+                results['status'] = 'skipped_stale_feed'
+                return results
+
             # Transition: IDLE -> FETCHING_DATA
             await self._transition_to(ExecutionState.FETCHING_DATA)
-            
+
             # Stage 1: Fetch Real Market Data
             logger.info(f"\n📊 Stage 1: Fetching market data for {symbol}...")
             market_data = await self._fetch_market_data(symbol)
@@ -426,13 +458,29 @@ class LiveTradingService:
             
             # Transition: FETCHING_DATA -> ANALYZING
             await self._transition_to(ExecutionState.ANALYZING)
-            
-            # Stage 2: AI Analysis with OpenRouter
-            logger.info("\n🧠 Stage 2: Running AI analysis...")
+
+            # Stage 2: AI Analysis — regime + strategy from cache when fresh (C3)
+            _cache = self._inference_cache
+            _cache_age = time.time() - _cache.get("cached_at", 0.0)
+            _cache_hit = bool(_cache.get("regime")) and _cache_age < self._inference_cache_ttl
+
+            if _cache_hit:
+                logger.info(
+                    "\n🧠 Stage 2: AI analysis (cache hit — regime=%s age=%.1fs)",
+                    _cache["regime"], _cache_age,
+                )
+            else:
+                logger.info(
+                    "\n🧠 Stage 2: AI analysis (cache miss — age=%.1fs, running inline LLM)",
+                    _cache_age,
+                )
+
             ai_result = await self.orchestrator.run_paper_trade_cycle(
                 market_data=market_data,
                 user_id=user_id,
-                db_session=db_session
+                db_session=db_session,
+                cached_regime=_cache.get("regime") if _cache_hit else None,
+                cached_strategy=_cache.get("strategy") if _cache_hit else None,
             )
             
             # Handle AI rejection gracefully (not an error, just no trade)
@@ -1226,13 +1274,14 @@ class LiveTradingService:
         ticker = await self.exchange_manager.fetch_ticker(trade.symbol)
         exit_price = ticker['last_price']
         
-        # Close position on exchange
+        # Close position on exchange — CLOSE orders allow secondary-venue failover
         side = 'sell' if trade.side == 'LONG' else 'buy'
-        closure_order = await self.exchange_manager.create_market_order(
+        closure_order = await self.router.create_market_order(
             symbol=trade.symbol,
             side=side,
             amount=trade.qty,
-            leverage=trade.leverage
+            leverage=trade.leverage,
+            order_type=OrderType.CLOSE,
         )
         
         # Calculate P&L
@@ -1283,9 +1332,68 @@ class LiveTradingService:
             'status': 'closed'
         }
     
+    # ── C3: LLM Inference Pre-computation ────────────────────────────────────
+
+    def start_background_inference(self) -> None:
+        """
+        Spawn the background LLM inference loop as a fire-and-forget task.
+
+        Uses a module-level guard so only ONE task runs per process regardless
+        of how many LiveTradingService instances are created. Safe to call
+        multiple times — subsequent calls are no-ops.
+
+        Call from worker_gold_bot.py main() or trading_api.py startup hook.
+        """
+        global _INFERENCE_BACKGROUND_STARTED
+        if _INFERENCE_BACKGROUND_STARTED:
+            logger.debug("🧠 [C3] Background inference already running — skipping duplicate start")
+            return
+        _INFERENCE_BACKGROUND_STARTED = True
+        asyncio.create_task(
+            self._background_inference_loop(),
+            name="llm_inference_prefetch",
+        )
+        logger.info("🧠 [C3] Background LLM inference loop started (interval=15s ttl=%ds)", _INFERENCE_CACHE_TTL)
+
+    async def _background_inference_loop(self) -> None:
+        """
+        Pre-compute XAUUSDT regime + strategy on a 15 s cadence.
+
+        Results are stored in self._inference_cache. The hot path checks cache
+        age; if stale (>20 s) it falls back to inline LLM calls automatically.
+        Exceptions are non-fatal — the trading cycle continues with inline calls.
+        """
+        _INTERVAL = 15  # seconds between refreshes
+        symbol = settings.PRIMARY_TRADING_SYMBOL
+
+        while not self._shutdown:
+            try:
+                market_data = await self._fetch_market_data(symbol)
+                enriched = self.orchestrator._enrich_market_context(market_data)
+
+                # Sequential: select_strategy needs regime as input, cannot parallelise
+                regime = await self.orchestrator.detect_regime(enriched)
+                strategy = await self.orchestrator.select_strategy(enriched, regime)
+
+                # Mutate in-place so all LiveTradingService instances see the update
+                _SHARED_INFERENCE_CACHE["regime"] = regime
+                _SHARED_INFERENCE_CACHE["strategy"] = strategy
+                _SHARED_INFERENCE_CACHE["cached_at"] = time.time()
+                logger.debug(
+                    "🧠 [C3] Cache refreshed: regime=%s strategy=%s",
+                    regime, strategy.get("strategy"),
+                )
+            except Exception as exc:
+                logger.warning("⚠️  [C3] Background inference loop error (non-fatal): %s", exc)
+
+            await asyncio.sleep(_INTERVAL)
+
+    # ─────────────────────────────────────────────────────────────────────────
+
     async def close(self):
         """Close all connections."""
-        await self.exchange_manager.close()
+        self._shutdown = True
+        await self.router.close()
     
     async def run_periodic_reconciliation(
         self,

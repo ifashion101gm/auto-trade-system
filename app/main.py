@@ -417,8 +417,13 @@ def require_admin(x_api_key: str | None = Header(default=None)):
     Raises:
         HTTPException: If key is missing or invalid
     """
-    # In production, use environment variable
-    admin_key = getattr(settings, 'ADMIN_API_KEY', 'CHANGE_ME_IN_PRODUCTION')
+    # SECURITY: ADMIN_API_KEY is validated at startup - no fallback to placeholder
+    admin_key = settings.ADMIN_API_KEY
+    
+    if not admin_key:
+        # This should never happen due to startup validation, but defense in depth
+        logger.critical("ADMIN_API_KEY is not set - this indicates a configuration error")
+        raise HTTPException(status_code=500, detail="Server configuration error - contact administrator")
     
     if not x_api_key or x_api_key != admin_key:
         raise HTTPException(status_code=401, detail="Unauthorized - Admin API key required")
@@ -601,6 +606,16 @@ def _initialize_metrics_defaults():
 async def init_services():
     """Initialize all services."""
     logger.info(" Initializing enterprise services...")
+    
+    # SECURITY BASELINE: Validate ADMIN_API_KEY before initializing any services
+    # This ensures the application crashes on placeholder/insecure values
+    try:
+        settings.validate_admin_api_key()
+        logger.info("✅ ADMIN_API_KEY validation passed (security baseline)")
+    except ValueError as e:
+        logger.critical(f"🚨 SECURITY VALIDATION FAILED: {e}")
+        logger.critical("Application cannot start with insecure ADMIN_API_KEY configuration")
+        raise SystemExit(1) from e
     
     # Database
     await init_db()

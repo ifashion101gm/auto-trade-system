@@ -138,6 +138,31 @@ class PositionSyncService:
         self._last_ws_update_time = time.time()
         logger.debug(f"📡 WebSocket position update received at {self._last_ws_update_time}")
     
+    def is_websocket_stale(self, threshold_seconds: int = 30) -> bool:
+        """
+        Check if WebSocket data is stale (no updates within threshold).
+        
+        Args:
+            threshold_seconds: Maximum age before considering data stale
+        
+        Returns:
+            True if no WebSocket update received within threshold
+        """
+        if not self._last_ws_update_time:
+            logger.warning("⚠️ No WebSocket updates received yet")
+            return True
+        
+        import time
+        age = time.time() - self._last_ws_update_time
+        if age > threshold_seconds:
+            logger.warning(
+                f"⚠️ WebSocket data is stale ({age:.1f}s old, "
+                f"threshold: {threshold_seconds}s)"
+            )
+            return True
+        
+        return False
+    
     async def _on_websocket_reconnected(self, event):
         """
         Handle WebSocket reconnection by triggering immediate sync.

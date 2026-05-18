@@ -1,78 +1,151 @@
 """
-AI Orchestrator with parallel agent stages for reduced latency.
-Implements concurrent regime detection and strategy selection.
-Integrates with paper trading cycle, database persistence, and OpenRouter LLMs.
+AI Orchestrator — Enterprise v2.
+
+Parallel agent stages: regime detection and strategy selection run concurrently
+(asyncio.gather), then risk assessment runs on the combined output.
+
+Enterprise v2 additions:
+- Context enrichment pipeline (_enrich_market_context) builds a rich market_data
+  snapshot with session, DXY, spread, and derived indicator fields before any LLM call
+- All LLM calls use prompts from app.llm.prompts via the upgraded OpenRouterClient
+  (now backed by Anthropic directly with prompt-cache headers)
+- Per-cycle telemetry: log LLM provider, models used, token cost estimate
+- XAUUSDT-specific regime taxonomy (7 labels instead of 3)
+- Backward-compatible interface (run_paper_trade_cycle, run_cycle_parallel)
 """
 import asyncio
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import DecisionJournal, StrategyEvaluations, PaperTrades
 from app.llm.openrouter_client import OpenRouterClient
+from app.llm.prompts import PROMPTS_VERSION
 from app.logging_config import get_logger
+from app.config import settings
 
 logger = get_logger(__name__)
 
 
 class AIAgentOrchestrator:
     """
-    Orchestrates AI agent pipeline with parallel execution.
-    
-    Zone C Optimization: Parallel Agent Stages
-    - Runs independent agents concurrently using asyncio.gather()
-    - Reduces cycle latency by ~200-400ms per cycle
+    Enterprise AI orchestrator for XAUUSDT algorithmic trading.
+
+    Pipeline (parallel where independent):
+      1. Context enrichment  — _enrich_market_context()
+      2a. Regime detection   — LLM (Haiku T1) ─┐
+      2b. Strategy selection — LLM (Haiku T1) ─┤ asyncio.gather()
+      3.  Risk assessment    — LLM (Sonnet T2) — depends on 2a+2b
+      4.  Trade proposal     — deterministic code
+      5.  DB persistence     — async
     """
-    
+
     def __init__(self, use_openrouter: bool = True, risk_engine=None):
         """
-        Initialize AI orchestrator.
-        
         Args:
-            use_openrouter: Whether to use OpenRouter for LLM calls (default: True)
-            risk_engine: Optional RiskEngine instance for pre-trade validation
+            use_openrouter: Kept for backward compatibility; now always uses
+                            Anthropic direct. Set False for heuristic-only mode.
+            risk_engine: Optional RiskEngine for pre-trade validation.
         """
         self._consecutive_failures = 0
         self._failure_threshold = 3
         self._paused = False
         self._pause_reason = None
-        
-        # Strategy performance tracking for meta-learning
-        self._strategy_performance = {}  # {strategy_name: {'wins': 0, 'losses': 0, 'total': 0}}
-        self._kill_switch = {}  # {strategy_name: disabled_until_timestamp}
-        
-        # Optional risk engine injection
+
+        # Strategy meta-learning (win/loss tracking per strategy)
+        self._strategy_performance: Dict[str, Dict[str, int]] = {}
+        self._kill_switch: Dict[str, float] = {}  # {strategy: disabled_until_ts}
+
         self.risk_engine = risk_engine
-        
-        # Initialize OpenRouter client if enabled
+
+        # LLM client — uses Anthropic direct (OpenRouterClient is now Anthropic-backed)
         self.use_openrouter = use_openrouter
-        if self.use_openrouter:
+        if use_openrouter:
             try:
                 self.llm_client = OpenRouterClient()
-                logger.info("✅ Orchestrator using OpenRouter for LLM inference")
-            except Exception as e:
-                logger.warning(f"⚠️  OpenRouter initialization failed, falling back to heuristic mode: {e}")
+                logger.info(
+                    "✅ Orchestrator using Anthropic LLM (prompts_v=%s)", PROMPTS_VERSION
+                )
+            except Exception as exc:
+                logger.warning("⚠️  LLM client init failed — heuristic mode: %s", exc)
                 self.use_openrouter = False
                 self.llm_client = None
         else:
             self.llm_client = None
-            logger.info("ℹ️  Orchestrator in heuristic mode (no LLM)")
+            logger.info("Orchestrator: heuristic mode (LLM disabled)")
+
+    # ── Context enrichment ────────────────────────────────────────────────────
+
+    def _enrich_market_context(self, market_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Augment raw market_data with derived fields required by prompt builders.
+
+        Adds: session, dxy_trend, spread_pct, atr_pct, volume_ratio, price_change_1h_pct.
+        Safe: does not mutate the original dict; returns a new enriched copy.
+        """
+        data = dict(market_data)
+        indicators = dict(data.get("indicators", {}))
+
+        # Price — normalise key
+        price = float(data.get("price", data.get("current_price", 0)) or 0)
+        if price == 0 and indicators.get("close"):
+            price = float(indicators["close"])
+        data["price"] = price
+
+        # ATR % — used by regime classifier
+        atr = float(indicators.get("atr", 0) or 0)
+        if price > 0 and atr > 0:
+            indicators.setdefault("atr_pct", round(atr / price * 100, 4))
+
+        # Volume ratio — current vs 24h avg
+        vol_24h = float(indicators.get("volume_24h", 0) or 0)
+        vol_cur = float(indicators.get("volume", 0) or 0)
+        if vol_24h > 0 and vol_cur > 0:
+            indicators.setdefault("volume_ratio", round(vol_cur / (vol_24h / 24), 3))
+        else:
+            indicators.setdefault("volume_ratio", 1.0)
+
+        # Session — derive from UTC time if not already set
+        if "session" not in data:
+            data["session"] = self._get_session_label()
+
+        # Defaults for optional context fields
+        data.setdefault("dxy_trend", "flat")
+        data.setdefault("spread_pct", 0.05)
+        data.setdefault("news_events", 0)
+        data.setdefault("price_change_1h_pct", 0.0)
+        data.setdefault("account_balance", getattr(settings, "LIVE_TRADING_MAX_POSITION_USD", 500.0))
+
+        data["indicators"] = indicators
+        return data
+
+    @staticmethod
+    def _get_session_label() -> str:
+        """Return current UTC trading session label."""
+        from datetime import time as dt_time
+        now = datetime.now(timezone.utc).time()
+        if dt_time(7, 50) <= now <= dt_time(10, 30):
+            return "london_open"
+        if dt_time(13, 20) <= now <= dt_time(16, 30):
+            return "ny_open"
+        return "dead"
     
     async def detect_regime(self, market_data: Dict[str, Any]) -> str:
         """
-        Detect current market regime using 2D Regime Matrix (Volatility × Trend Strength).
-        
-        Uses OpenRouter LLM if available, otherwise falls back to heuristic.
-        Enhanced with trend strength analysis for better strategy selection.
+        Classify XAUUSDT market regime using the enterprise LLM client.
+
+        Enriches context before calling the LLM; heuristic fallback on failure.
+        Returns one of: low_vol_range | low_vol_trending | normal | normal_trending |
+        high_vol_breakout | high_vol_reversal | avoid
         """
+        enriched = self._enrich_market_context(market_data)
         if self.use_openrouter and self.llm_client:
             try:
-                # Use OpenRouter for intelligent regime detection
-                regime = await self.llm_client.detect_regime(market_data)
+                regime = await self.llm_client.detect_regime(enriched)
                 return regime
-            except Exception as e:
-                logger.warning(f"⚠️  OpenRouter regime detection failed, using heuristic: {e}")
+            except Exception as exc:
+                logger.warning("Regime detection LLM failed — heuristic: %s", exc)
         
         # Fallback to enhanced heuristic logic with 2D matrix
         volatility = market_data.get('volatility', 0.5)
@@ -361,33 +434,24 @@ class AIAgentOrchestrator:
         self,
         market_data: Dict[str, Any],
         user_id: str = "default_user",
-        db_session: Optional[AsyncSession] = None
+        db_session: Optional[AsyncSession] = None,
+        cached_regime: Optional[str] = None,
+        cached_strategy: Optional[Dict] = None,
     ) -> Dict[str, Any]:
         """
         Execute complete paper trading cycle with AI analysis and database persistence.
-        
-        This integrates:
-        1. Parallel AI agent execution (regime detection + strategy selection)
-        2. Risk assessment
-        3. Trade proposal generation
-        4. Database persistence (DecisionJournal, StrategyEvaluations)
-        5. Returns structured trade decision
-        
-        Args:
-            market_data: Current market snapshot (price, volume, indicators)
-            user_id: User identifier for tracking
-            db_session: Optional database session for persistence
-            
-        Returns:
-            Complete trade decision with all analysis results
+
+        cached_regime / cached_strategy: pre-computed by the background inference loop
+        (C3 architecture decision). When provided and valid, regime and strategy LLM
+        calls are skipped — only risk assessment (Sonnet) runs synchronously.
         """
         start_time = time.time()
-        
+
         try:
             # Check circuit breaker
             if self._paused:
                 raise RuntimeError(f"Orchestrator paused: {self._pause_reason}")
-            
+
             # Optional: Check risk engine if injected
             if hasattr(self, 'risk_engine') and self.risk_engine:
                 risk_decision = await self.risk_engine.check_trade_approval(
@@ -402,10 +466,18 @@ class AIAgentOrchestrator:
                         "cycle_time_ms": round((time.time() - start_time) * 1000, 2),
                         "timestamp": datetime.utcnow().isoformat()
                     }
-            
-            # Step 1: Run independent agents in parallel
-            regime = await self.detect_regime(market_data)
-            strategy = await self.select_strategy(market_data, regime)  # Pass regime for better selection
+
+            # Step 1: Regime + strategy — use pre-computed cache when available (C3)
+            if cached_regime and cached_strategy:
+                regime = cached_regime
+                strategy = cached_strategy
+                logger.info(
+                    "🎯 [C3] Using cached inference: regime=%s strategy=%s",
+                    regime, strategy.get("strategy"),
+                )
+            else:
+                regime = await self.detect_regime(market_data)
+                strategy = await self.select_strategy(market_data, regime)
             
             # Step 2: Risk assessment (depends on strategy)
             risk = await self.assess_risk(strategy, market_data)  # Pass market_data for better assessment

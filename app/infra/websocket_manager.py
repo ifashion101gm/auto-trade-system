@@ -303,6 +303,27 @@ class WebSocketManager:
         """Check if WebSocket is currently connected."""
         return self._connected
     
+    def is_data_stale(self, threshold_seconds: int = 30) -> bool:
+        """
+        Check if any active stream has stale data.
+        
+        Args:
+            threshold_seconds: Maximum age of data before considering it stale
+        
+        Returns:
+            True if any stream hasn't received data within threshold
+        """
+        current_time = time.time()
+        for stream_id, last_heartbeat in self._last_heartbeat.items():
+            age = current_time - last_heartbeat
+            if age > threshold_seconds:
+                logger.warning(
+                    f"⚠️ Stream {stream_id} data is stale ({age:.1f}s old, "
+                    f"threshold: {threshold_seconds}s)"
+                )
+                return True
+        return False
+    
     def get_cached_positions(self) -> List[Dict]:
         """Get cached positions from WebSocket stream."""
         return self._cache.get('positions', [])

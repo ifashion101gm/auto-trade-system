@@ -19,6 +19,11 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+class NewsGuardSafetyException(Exception):
+    """Raised when trading is blocked due to news event."""
+    pass
+
+
 class NewsEventType(Enum):
     """High-impact news event types."""
     CPI = "cpi"
@@ -145,6 +150,21 @@ class NewsGuard:
         
         self.blocked_by_event = None
         return True
+    
+    def enforce_safety_check(self):
+        """
+        Hard halt - raises exception if trading is unsafe.
+        
+        This ensures a hard failure rather than soft boolean check,
+        preventing trades during critical news events without proper validation.
+        
+        Raises:
+            NewsGuardSafetyException: If trading is blocked due to news event
+        """
+        if not self.is_trading_safe():
+            raise NewsGuardSafetyException(
+                f"Trading halted due to news event: {self.blocked_by_event.event_type.value}"
+            )
     
     def get_next_event(self) -> Optional[NewsEvent]:
         """

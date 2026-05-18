@@ -17,6 +17,14 @@ Contains documentation related to exchanges or features that are no longer activ
 
 **⚠️ Warning:** Do NOT use these documents for current system setup. Refer to main README.md and BYBIT_DEMO_TRADING_CONFIGURATION.md instead.
 
+### Archived Code Files
+
+**main_enterprise_DEPRECATED.py** (Archived 2026-05-18)
+- Superseded by `app/main.py` which contains all enterprise features
+- This file was a duplicate entry point that caused confusion
+- All features (session scheduler, news guard, admin routes) are in main.py
+- **Do not use this file** - it is preserved for historical reference only
+
 ### `/historical_reports/`
 Contains time-specific status reports, validation cycles, and implementation updates from specific dates.
 

@@ -7,6 +7,7 @@ import logging
 from typing import Dict, Any, Optional, List
 from app.config import settings
 from app.logging_config import get_logger
+from app.infra.rate_limit import RateLimiter
 
 logger = get_logger(__name__)
 
@@ -32,9 +33,13 @@ class UnifiedExchangeManager:
         """
         self.exchange_name = exchange_name or settings.ACTIVE_EXCHANGE
         self.use_testnet = use_testnet if use_testnet is not None else settings.BINANCE_TESTNET
-        
+
         # Initialize appropriate exchange client
         self.client = self._create_client()
+
+        # Lazy-initialized Redis rate limiter (None until first API call)
+        self._rate_limiter: Optional[RateLimiter] = None
+
         logger.info(f"✅ Exchange Manager initialized: {self.exchange_name.upper()} ({'TESTNET' if self.use_testnet else 'LIVE'})")
     
     def _create_client(self):
@@ -109,18 +114,42 @@ class UnifiedExchangeManager:
             demo_trading=demo_trading
         )
     
+    async def _check_rate_limit(self, endpoint: str) -> None:
+        """Enforce per-second sliding-window rate limit via Redis. Degrades gracefully if Redis is absent."""
+        if not getattr(settings, 'BYBIT_RATE_LIMIT_ENABLED', True):
+            return
+        if self._rate_limiter is None:
+            try:
+                self._rate_limiter = RateLimiter(redis_url=settings.REDIS_URL)
+            except Exception:
+                return  # Redis unavailable — skip silently, do not block execution
+        try:
+            allowed = await self._rate_limiter.is_allowed(
+                f"bybit:{self.exchange_name}:{endpoint}",
+                limit=getattr(settings, 'BYBIT_RATE_LIMIT_CALLS_PER_SECOND', 10),
+                window_s=1,
+                burst=2,
+            )
+            if not allowed:
+                raise RuntimeError(f"Bybit rate limit exceeded for endpoint '{endpoint}'")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass  # Redis error — skip rate check, do not break execution
+
     async def fetch_balance(self) -> Dict[str, Any]:
         """Fetch account balance."""
         return await self.client.fetch_balance()
-    
+
     async def fetch_ticker(self, symbol: str) -> Dict[str, Any]:
         """Fetch real-time ticker data."""
+        await self._check_rate_limit("fetch_ticker")
         return await self.client.fetch_ticker(symbol)
-    
+
     async def fetch_ohlcv(self, symbol: str, timeframe: str = '1h', limit: int = 100) -> List[List]:
         """Fetch OHLCV candlestick data."""
         return await self.client.fetch_ohlcv(symbol, timeframe, limit)
-    
+
     async def create_market_order(
         self,
         symbol: str,
@@ -129,6 +158,7 @@ class UnifiedExchangeManager:
         leverage: int = 1
     ) -> Dict[str, Any]:
         """Place a market order."""
+        await self._check_rate_limit("create_market_order")
         return await self.client.create_market_order(symbol, side, amount, leverage)
     
     async def create_limit_order(

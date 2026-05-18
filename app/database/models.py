@@ -699,3 +699,22 @@ class ExchangeHealthChecks(Base):
         Index('idx_health_exchange_time', 'exchange', 'timestamp'),
         Index('idx_health_status', 'status'),
     )
+
+
+class RiskState(Base):
+    """
+    Single-source-of-truth for risk engine state.
+    Replaces .risk_state.json file with PostgreSQL persistence.
+    Singleton pattern - only one row with id=1.
+    """
+    __tablename__ = 'risk_state'
+    
+    id = Column(Integer, primary_key=True, default=1)
+    daily_loss_lock_active = Column(Integer, nullable=False, server_default='0')  # Boolean as integer
+    drawdown_lock_active = Column(Integer, nullable=False, server_default='0')  # Boolean as integer
+    daily_pnl = Column(Float, nullable=False, server_default='0.0')
+    daily_pnl_pct = Column(Float, nullable=False, server_default='0.0')
+    current_balance = Column(Float, nullable=False, server_default='0.0')
+    peak_balance = Column(Float, nullable=False, server_default='0.0')
+    today_date = Column(String(10), nullable=True)  # YYYY-MM-DD format
+    last_updated = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

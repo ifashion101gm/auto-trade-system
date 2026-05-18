@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timezone
 
 from app.infra.exchange_manager import UnifiedExchangeManager
+from app.infra.smart_order_router import SmartOrderRouter, OrderType
 from app.risk.risk_engine import RiskEngine
 from app.risk.validator import TradeValidator
 from app.notifications.notifier import TelegramNotifier
@@ -34,6 +35,7 @@ from app.risk.leverage_manager import LeverageManager
 from app.infra.kill_switch import KillSwitch
 from app.runtime.news_guard import NewsGuard
 from app.analytics.ai_edge_tracker import AIEdgeTracker
+from app.execution.dedup_engine import DuplicateProtectionEngine
 
 logger = get_logger(__name__)
 
@@ -119,11 +121,9 @@ class ExecutionService:
         self.use_testnet = use_testnet
         self.db_session_factory = db_session_factory
         
-        # Initialize components
-        self.exchange_manager = UnifiedExchangeManager(
-            exchange_name=exchange_name,
-            use_testnet=use_testnet
-        )
+        # Initialize components — router wraps exchange and adds CLOSE failover
+        self.router = SmartOrderRouter.build_with_secondary()
+        self.exchange_manager = self.router  # alias: all reads/closes go through router
         # Initialize notifier first so KillSwitch can use it
         self.notifier = TelegramNotifier()
 
@@ -145,6 +145,16 @@ class ExecutionService:
 
         # AI edge tracker (session injected per-request)
         self.ai_edge_tracker = AIEdgeTracker()
+
+        # Signal deduplication — prevents replay of the same signal on retry
+        # Falls back to in-memory cache if Redis is unavailable
+        self._dedup: Optional[DuplicateProtectionEngine] = None
+        try:
+            import redis.asyncio as _redis
+            _rc = _redis.from_url(settings.REDIS_URL, decode_responses=True)
+            self._dedup = DuplicateProtectionEngine(redis_client=_rc)
+        except Exception:
+            self._dedup = DuplicateProtectionEngine()  # in-memory fallback
 
         logger.info(f"✅ Execution Service initialized ({exchange_name.upper()} {'TESTNET' if use_testnet else 'LIVE'})")
     
@@ -190,6 +200,27 @@ class ExecutionService:
                     error=f"Circuit breaker OPEN: {circuit_state.reason}"
                 )
             
+            # STEP 0.5: Signal deduplication — reject replays of the same signal
+            if self._dedup is not None:
+                dedup_result = await self._dedup.check_and_mark_signal({
+                    'symbol': request.symbol,
+                    'side': request.side,
+                    'entry_price': request.entry_price,
+                    'strategy': request.strategy_name,
+                    'user_id': request.user_id,
+                })
+                if dedup_result.get('is_duplicate'):
+                    logger.warning(
+                        "⚠️ Duplicate signal rejected [%s]: %s %s @ %.4f",
+                        dedup_result.get('signal_hash', '')[:12],
+                        request.symbol, request.side, request.entry_price,
+                    )
+                    return ExecutionResult(
+                        success=False,
+                        status='duplicate_signal',
+                        error='Signal already processed (dedup protection)'
+                    )
+
             # STEP 1: Validate request parameters
             validation_result = await self._validate_request(request)
             if not validation_result.success:
@@ -438,11 +469,12 @@ class ExecutionService:
             try:
                 # Place order with timeout
                 order_result = await asyncio.wait_for(
-                    self.exchange_manager.create_market_order(
+                    self.router.create_market_order(
                         symbol=request.symbol,
                         side=request.side.lower(),
                         amount=request.quantity,
-                        leverage=request.leverage
+                        leverage=request.leverage,
+                        order_type=OrderType.ENTRY,
                     ),
                     timeout=timeout_seconds
                 )
@@ -668,4 +700,4 @@ class ExecutionService:
     
     async def close(self):
         """Close exchange connections."""
-        await self.exchange_manager.close()
+        await self.router.close()

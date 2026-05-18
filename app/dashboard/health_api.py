@@ -11,7 +11,7 @@ These endpoints support observability and operational monitoring.
 """
 from datetime import datetime
 from typing import Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Response
 from pydantic import BaseModel
 
 from app.logging_config import get_logger
@@ -75,32 +75,33 @@ class WatchdogStatusResponse(BaseModel):
 # ============================================================================
 
 @router.get("/health", response_model=HealthStatusResponse)
-async def health_check():
+async def health_check(response: Response):
     """
-    Public health check endpoint.
-    
-    Returns basic system status without authentication.
-    Suitable for load balancer health checks and uptime monitoring.
-    
-    Returns:
-        HealthStatusResponse with overall system status
+    Readiness health check — used by K8s readiness probes and load balancers.
+
+    Returns 200 only when the application is ready to serve traffic:
+      - PostgreSQL connection reachable
+      - App state initialized
+
+    Returns 503 (service unavailable) when not ready so K8s stops routing
+    traffic to this pod until it recovers.
     """
     try:
-        # Quick checks to determine overall health
-        status = "healthy"
-        
-        # In production, you might check:
-        # - Database connectivity (quick ping)
-        # - Exchange API availability (cached status)
-        # - Memory usage (< critical threshold)
-        
+        from app.database.connection import async_session_maker
+        from sqlalchemy import text
+
+        # Quick DB ping — if this fails the pod is not ready
+        async with async_session_maker() as session:
+            await session.execute(text("SELECT 1"))
+
         return HealthStatusResponse(
-            status=status,
+            status="healthy",
             timestamp=datetime.utcnow().isoformat()
         )
-        
+
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
+        logger.warning("Health check: DB not reachable — returning 503: %s", e)
+        response.status_code = 503
         return HealthStatusResponse(
             status="unhealthy",
             timestamp=datetime.utcnow().isoformat()
