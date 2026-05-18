@@ -6,7 +6,8 @@
 
 .PHONY: help dev setup test lint deploy logs clean db-migrate db-reset \
         docker-up docker-down docker-build docker-logs docker-clean \
-        format check-types coverage pre-commit-install
+        format check-types coverage pre-commit-install \
+        readiness-check readiness-deep
 
 # =============================================================================
 # VARIABLES
@@ -412,6 +413,22 @@ stats: ## Show project statistics
 	@echo "$(YELLOW)Total Test Lines:$(NC)"
 	@find tests/ -name "*.py" -exec cat {} + | wc -l
 	@echo ""
+
+# =============================================================================
+# READINESS VALIDATION TARGETS
+# =============================================================================
+
+readiness-check: ## Run quick production readiness validation (<30s)
+	$(VENV_PYTHON) scripts/system_readiness.py --mode quick; \
+	EXIT=$$?; \
+	if [ $$EXIT -eq 0 ]; then echo "✅ GO"; else echo "❌ NO-GO"; fi; \
+	exit $$EXIT
+
+readiness-deep: ## Run full readiness validation including live simulation
+	$(VENV_PYTHON) scripts/system_readiness.py --mode deep; \
+	EXIT=$$?; \
+	if [ $$EXIT -eq 0 ]; then echo "✅ GO"; else echo "❌ NO-GO"; fi; \
+	exit $$EXIT
 
 # =============================================================================
 # END OF MAKEFILE
