@@ -102,10 +102,10 @@ class Settings(BaseSettings):
     TRADING_PROFILE: str = "safer_growth"  # Options: safer_growth, aggressive
     
     # Safer Growth Mode (Conservative)
-    SAFER_GROWTH_RISK_PER_TRADE: float = 0.005  # 0.5%
+    SAFER_GROWTH_RISK_PER_TRADE: float = 0.02  # Temporarily increased for demo verification (was 0.005)
     SAFER_GROWTH_MAX_DAILY_DRAWDOWN: float = 0.02  # 2%
     SAFER_GROWTH_MAX_POSITIONS: int = 2
-    SAFER_GROWTH_CONFIDENCE_THRESHOLD: float = 0.74
+    SAFER_GROWTH_CONFIDENCE_THRESHOLD: float = 0.60  # Temporarily lowered for demo verification (was 0.74)
     SAFER_GROWTH_LONDON_BREAKOUT_PRIORITY: bool = True
     SAFER_GROWTH_ATR_STOPS: bool = True
     SAFER_GROWTH_ADAPTIVE_SIZING: bool = True

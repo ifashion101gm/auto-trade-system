@@ -7,8 +7,11 @@ BIGGEST SAVINGS:
 - ExecutionAgent: Deterministic order execution (NO LLM)
 - RiskManagerAgent: Formula-based risk management (NO LLM except complex cases)
 """
+import logging
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class MonitoringAgent:
@@ -497,14 +500,117 @@ class DeterministicRiskManager:
 class CodeBasedExecutionEngine:
     """
     Code-based execution engine (no LLM).
-    Stub implementation for compatibility.
+    Executes orders through exchange manager with retry logic.
     """
     
-    def __init__(self):
-        pass
+    def __init__(
+        self,
+        max_slippage_pct: float = 0.5,
+        max_spread_pct: float = 0.1,
+        max_retries: int = 3
+    ):
+        """
+        Initialize execution engine.
+        
+        Args:
+            max_slippage_pct: Maximum acceptable slippage percentage
+            max_spread_pct: Maximum acceptable spread percentage
+            max_retries: Maximum retry attempts for failed orders
+        """
+        self.max_slippage_pct = max_slippage_pct
+        self.max_spread_pct = max_spread_pct
+        self.max_retries = max_retries
+    
+    async def execute_with_retry(
+        self,
+        exchange_manager,
+        symbol: str,
+        side: str,
+        quantity: float,
+        leverage: int,
+        expected_price: float
+    ) -> Dict[str, Any]:
+        """
+        Execute order with retry logic.
+        
+        Args:
+            exchange_manager: Exchange manager instance
+            symbol: Trading symbol
+            side: 'buy' or 'sell'
+            quantity: Order quantity
+            leverage: Leverage multiplier
+            expected_price: Expected execution price
+            
+        Returns:
+            Dictionary with execution result:
+            {
+                'success': bool,
+                'order': dict (if successful),
+                'reason': str (if failed),
+                'retries_needed': int
+            }
+        """
+        last_error = None
+        
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                logger.info(f"⚡ Executing {side.upper()} order for {symbol} (attempt {attempt}/{self.max_retries})")
+                logger.debug(f"   Quantity: {quantity}, Leverage: {leverage}, Expected Price: {expected_price}")
+                
+                # Place market order through exchange manager
+                order_result = await exchange_manager.create_market_order(
+                    symbol=symbol,
+                    side=side,
+                    amount=quantity,
+                    leverage=leverage
+                )
+                
+                logger.info(f"✅ Order executed successfully: {order_result.get('order_id')}")
+                logger.debug(f"   Order details: {order_result}")
+                
+                return {
+                    'success': True,
+                    'order': order_result,
+                    'retries_needed': attempt - 1
+                }
+                
+            except KeyError as e:
+                # Handle missing dictionary keys specifically
+                last_error = e
+                key_name = str(e).strip("'\"")
+                logger.error(f"❌ KeyError on attempt {attempt}: Missing key '{key_name}'")
+                logger.error(f"   This usually means the API response is missing expected field: {key_name}")
+                
+                if attempt < self.max_retries:
+                    import asyncio
+                    delay = 1.0 * (2 ** (attempt - 1))
+                    logger.info(f"⏳ Retrying in {delay:.1f}s...")
+                    await asyncio.sleep(delay)
+                
+            except Exception as e:
+                last_error = e
+                logger.warning(f"⚠️ Order execution attempt {attempt} failed: {type(e).__name__}: {e}")
+                
+                if attempt < self.max_retries:
+                    # Wait before retry with exponential backoff
+                    import asyncio
+                    delay = 1.0 * (2 ** (attempt - 1))  # 1s, 2s, 4s...
+                    logger.info(f"⏳ Retrying in {delay:.1f}s...")
+                    await asyncio.sleep(delay)
+        
+        # All retries exhausted
+        logger.error(f"❌ Order execution failed after {self.max_retries} attempts")
+        error_type = type(last_error).__name__ if last_error else "Unknown"
+        error_msg = str(last_error) if last_error else "No error details"
+        
+        return {
+            'success': False,
+            'reason': f"{error_type}: {error_msg}",
+            'retries_needed': self.max_retries
+        }
     
     def execute(self, order: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute order."""
+        """Execute order (legacy method)."""
         return {'status': 'executed'}
 
 

@@ -1,0 +1,38 @@
+# Simple WireGuard VPN Connection Guide for Windows
+# Copy this content and follow the steps below
+
+Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host "WireGuard VPN Quick Setup" -ForegroundColor Cyan
+Write-Host "=========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "The PowerShell script requires Administrator privileges." -ForegroundColor Yellow
+Write-Host ""
+Write-Host "ALTERNATIVE: Use WireGuard GUI directly (simpler):" -ForegroundColor Green
+Write-Host ""
+Write-Host "Step 1: Import Configuration" -ForegroundColor Yellow
+Write-Host "  1. Open WireGuard GUI" -ForegroundColor Gray
+Write-Host "  2. Click 'Import tunnel(s) from file'" -ForegroundColor Gray
+Write-Host "  3. Select: client_windows.conf" -ForegroundColor Gray
+Write-Host ""
+Write-Host "Step 2: Edit Configuration (IMPORTANT!)" -ForegroundColor Yellow
+Write-Host "  1. Right-click on the imported tunnel" -ForegroundColor Gray
+Write-Host "  2. Select 'Edit'" -ForegroundColor Gray
+Write-Host "  3. Change this line:" -ForegroundColor Gray
+Write-Host "     FROM: AllowedIPs = 0.0.0.0/0, ::/0" -ForegroundColor Red
+Write-Host "     TO:   AllowedIPs = 0.0.0.0/1, 128.0.0.0/1, ::/0" -ForegroundColor Green
+Write-Host "  4. Click 'Save'" -ForegroundColor Gray
+Write-Host ""
+Write-Host "Step 3: Activate" -ForegroundColor Yellow
+Write-Host "  Click 'Activate' - SSH connection will remain stable!" -ForegroundColor Green
+Write-Host ""
+Write-Host "Why this works:" -ForegroundColor Cyan
+Write-Host "  - 0.0.0.0/1 routes IPs 0.0.0.0 - 127.255.255.255 through VPN" -ForegroundColor Gray
+Write-Host "  - 128.0.0.0/1 routes IPs 128.0.0.0 - 255.255.255.255 through VPN" -ForegroundColor Gray
+Write-Host "  - This EXCLUDES your VPS IP (47.84.5.196) from VPN routing" -ForegroundColor Gray
+Write-Host "  - SSH stays direct, all other traffic uses VPN" -ForegroundColor Gray
+Write-Host ""
+Write-Host "Verify it works:" -ForegroundColor Yellow
+Write-Host "  Open a NEW PowerShell window and run:" -ForegroundColor Gray
+Write-Host "  curl.exe ifconfig.me" -ForegroundColor Cyan
+Write-Host "  Should show: 47.84.5.196" -ForegroundColor Green
+Write-Host ""

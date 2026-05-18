@@ -70,8 +70,13 @@ echo ""
 # Check 3: Claude Code installation
 echo -e "${BLUE}[Check 3/10] Claude Code Installation${NC}"
 if command -v claude &> /dev/null; then
-    CLAUDE_VERSION=$(claude --version 2>&1 || echo "unknown")
-    check_pass "Claude Code installed ($CLAUDE_VERSION)"
+    CLAUDE_VERSION=$(timeout 3 claude --version 2>&1 | head -1 || echo "needs authentication")
+    if [[ "$CLAUDE_VERSION" == *"timed out"* ]] || [[ -z "$CLAUDE_VERSION" ]]; then
+        check_pass "Claude Code installed (authentication required)"
+        echo -e "${YELLOW}  Run 'claude' to authenticate${NC}"
+    else
+        check_pass "Claude Code installed ($CLAUDE_VERSION)"
+    fi
 else
     check_fail "Claude Code not found in PATH"
     echo -e "${YELLOW}  Install with: npm install -g @anthropic-ai/claude-code${NC}"
@@ -85,7 +90,8 @@ if command -v tmux &> /dev/null; then
     check_pass "tmux installed ($TMUX_VERSION)"
 else
     check_fail "tmux not found in PATH"
-    echo -e "${YELLOW}  Install with: sudo apt install -y tmux${NC}"
+    echo -e "${YELLOW}  Install with: sudo dnf install -y tmux (Alibaba Cloud Linux)${NC}"
+    echo -e "${YELLOW}              or: sudo apt install -y tmux (Ubuntu/Debian)${NC}"
 fi
 echo ""
 

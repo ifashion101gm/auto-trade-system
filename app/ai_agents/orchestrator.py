@@ -618,6 +618,21 @@ class AIAgentOrchestrator:
         if leverage == 0:
             return None
         
+        # CRITICAL: Cap leverage at RiskEngine's recommended level to avoid rejection
+        # The RiskEngine uses dynamic leverage recommendations based on volatility
+        # We should propose conservative leverage that will pass validation
+        try:
+            from app.risk.leverage_manager import LeverageManager
+            leverage_mgr = LeverageManager()
+            vol_pct = market_data.get('volatility')
+            recommended_leverage = leverage_mgr.recommend_leverage(symbol=market_data.get('symbol', ''), vol_pct=vol_pct)
+            # Use the minimum of regime-based and recommended leverage
+            leverage = min(leverage, recommended_leverage)
+            logger.info(f"🔧 Leverage adjusted: regime={leverage_map.get(regime, 2)}x, recommended={recommended_leverage}x, final={leverage}x")
+        except Exception as e:
+            logger.warning(f"Could not adjust leverage dynamically: {e}")
+            # Keep original regime-based leverage as fallback
+        
         # Calculate quantity to ensure position value stays within limits
         # Formula: quantity = (max_notional × confidence) / (entry_price × leverage)
         # This ensures: entry_price × quantity × leverage = max_notional × confidence ≤ max_notional

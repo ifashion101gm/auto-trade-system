@@ -863,6 +863,7 @@ class LiveTradingService:
             if not validation.approved:
                 logger.warning(f"Trade REJECTED: {validation.violations}")
                 # Update proposal status to rejected
+                proposal_id = proposal.get('id') or proposal.get('proposal_id')
                 if db_session and proposal_id:
                     from sqlalchemy import select
                     stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
@@ -914,6 +915,7 @@ class LiveTradingService:
             if not validation.approved:
                 logger.warning(f"Trade REJECTED: {validation.violations}")
                 # Update proposal status to rejected
+                proposal_id = proposal.get('id') or proposal.get('proposal_id')
                 if db_session and proposal_id:
                     from sqlalchemy import select
                     stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
@@ -976,6 +978,7 @@ class LiveTradingService:
             if not validation.approved:
                 logger.warning(f"Trade REJECTED: {validation.violations}")
                 # Update proposal status to rejected
+                proposal_id = proposal.get('id') or proposal.get('proposal_id')
                 if db_session and proposal_id:
                     from sqlalchemy import select
                     stmt = select(TradeProposals).where(TradeProposals.id == proposal_id)
