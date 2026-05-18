@@ -854,7 +854,8 @@ class LiveTradingService:
                 user_id=user_id,
                 db_session=db_session,
                 exchange=self.exchange_name,
-                symbol=symbol
+                symbol=symbol,
+                account_balance=balance.get('total_usdt') if balance else None
             )
             
             # Send validation report to Telegram
@@ -906,7 +907,8 @@ class LiveTradingService:
                 user_id=user_id,
                 db_session=db_session,
                 exchange=self.exchange_name,
-                symbol=symbol
+                symbol=symbol,
+                account_balance=balance.get('total_usdt') if balance else None
             )
             
             # Send validation report to Telegram
@@ -969,7 +971,8 @@ class LiveTradingService:
                 user_id=user_id,
                 db_session=db_session,
                 exchange=self.exchange_name,
-                symbol=symbol
+                symbol=symbol,
+                account_balance=balance.get('total_usdt') if balance else None
             )
             
             # Send validation report to Telegram
@@ -1368,7 +1371,8 @@ class LiveTradingService:
                 user_id=user_id,
                 db_session=db_session,
                 exchange="mexc",
-                symbol=settings.PRIMARY_TRADING_SYMBOL  # XAUUSDT only
+                symbol=settings.PRIMARY_TRADING_SYMBOL,  # XAUUSDT only
+                account_balance=balance.get('total_usdt') if balance else None
             )
             
             # Send validation report to Telegram

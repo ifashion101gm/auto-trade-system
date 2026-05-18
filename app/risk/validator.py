@@ -25,6 +25,7 @@ class ValidationResult:
     risk_threshold: float = 0.0
     position_value: float = 0.0
     risk_amount: float = 0.0
+    account_balance: float = 0.0
     daily_drawdown_pct: float = 0.0
     open_positions_count: int = 0
     proposed_trade: Dict[str, Any] = field(default_factory=dict)
@@ -77,7 +78,8 @@ class TradeValidator:
         user_id: str,
         db_session: AsyncSession,
         exchange: str = "mexc",
-        symbol: str = "XAUT/USDT"
+        symbol: str = "XAUT/USDT",
+        account_balance: Optional[float] = None
     ) -> ValidationResult:
         """
         Validate a trade proposal against all active rules.
@@ -88,6 +90,7 @@ class TradeValidator:
             db_session: Database session for querying current state
             exchange: Exchange name (mexc, binance, etc.)
             symbol: Trading pair symbol
+            account_balance: Current account balance for risk validation (optional)
             
         Returns:
             ValidationResult with approval status and any violations
@@ -106,7 +109,7 @@ class TradeValidator:
         
         # Run all validation checks
         await self._validate_confidence(proposal, result, symbol)
-        await self._validate_risk_per_trade(proposal, result, exchange, symbol)
+        await self._validate_risk_per_trade(proposal, result, exchange, symbol, account_balance)
         await self._validate_leverage(proposal, result, symbol)
         await self._validate_open_positions(user_id, db_session, result)
         await self._validate_daily_drawdown(user_id, db_session, result)
@@ -171,9 +174,16 @@ class TradeValidator:
         proposal: Dict[str, Any],
         result: ValidationResult,
         exchange: str,
-        symbol: str
+        symbol: str,
+        account_balance: Optional[float] = None
     ):
-        """Validate risk per trade against limits."""
+        """Validate risk per trade against limits.
+        
+        Uses ACCOUNT-BASED risk model (professional standard):
+        - Risk is calculated as percentage of account balance
+        - NOT as percentage of position value
+        - This ensures consistency with position sizing logic
+        """
         entry_price = proposal.get('entry_price', 0)
         stop_loss = proposal.get('stop_loss')
         quantity = proposal.get('quantity', 0)
@@ -194,8 +204,27 @@ class TradeValidator:
         risk_amount = risk_per_unit * quantity * leverage
         result.risk_amount = risk_amount
         
-        # Calculate risk as percentage of position value
-        risk_pct = risk_amount / position_value if position_value > 0 else 0
+        # Store account balance for reference
+        if account_balance:
+            result.account_balance = account_balance
+        
+        # CRITICAL FIX: Use account-based risk model (not position-based)
+        # This matches how positions are sized in the system
+        if account_balance and account_balance > 0:
+            # Calculate risk as percentage of ACCOUNT BALANCE
+            risk_pct = risk_amount / account_balance
+            logger.debug(
+                f"Risk validation (account-based): "
+                f"${risk_amount:.2f} / ${account_balance:.2f} = {risk_pct:.2%}"
+            )
+        else:
+            # Fallback to position-based if no balance provided
+            # This maintains backward compatibility
+            risk_pct = risk_amount / position_value if position_value > 0 else 0
+            logger.warning(
+                f"No account balance provided, using position-based risk: "
+                f"${risk_amount:.2f} / ${position_value:.2f} = {risk_pct:.2%}"
+            )
         
         # Determine effective risk threshold
         if 'GOLD' in symbol.upper() or 'XAUT' in symbol.upper() or 'PAXG' in symbol.upper():
@@ -207,10 +236,18 @@ class TradeValidator:
         result.risk_threshold = threshold
         
         if risk_pct > threshold:
-            result.violations.append(
-                f"Risk {risk_pct:.2%} (${risk_amount:.2f}) exceeds "
-                f"limit {threshold:.2%} of position value ${position_value:.2f}"
-            )
+            # Provide clear error message showing which model is being used
+            if account_balance and account_balance > 0:
+                violation_msg = (
+                    f"Risk {risk_pct:.2%} (${risk_amount:.2f}) exceeds "
+                    f"limit {threshold:.2%} of account balance ${account_balance:.2f}"
+                )
+            else:
+                violation_msg = (
+                    f"Risk {risk_pct:.2%} (${risk_amount:.2f}) exceeds "
+                    f"limit {threshold:.2%} of position value ${position_value:.2f}"
+                )
+            result.violations.append(violation_msg)
     
     async def _validate_leverage(
         self,

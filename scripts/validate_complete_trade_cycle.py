@@ -269,7 +269,8 @@ class TradeCycleVerifier:
                 user_id="test_user",
                 db_session=db_session,
                 exchange="mexc",
-                symbol="GOLD(XAUT)/USDT"
+                symbol="GOLD(XAUT)/USDT",
+                account_balance=100.0
             )
             
             logger.info(f"  Approved: {result.approved}")
@@ -292,7 +293,8 @@ class TradeCycleVerifier:
                 user_id="test_user",
                 db_session=db_session,
                 exchange="mexc",
-                symbol="GOLD(XAUT)/USDT"
+                symbol="GOLD(XAUT)/USDT",
+                account_balance=100.0
             )
             
             logger.info(f"  Approved: {result_fail.approved}")
@@ -314,7 +316,8 @@ class TradeCycleVerifier:
                 user_id="test_user",
                 db_session=db_session,
                 exchange="mexc",
-                symbol="GOLD(XAUT)/USDT"
+                symbol="GOLD(XAUT)/USDT",
+                account_balance=100.0
             )
             
             self.add_check(

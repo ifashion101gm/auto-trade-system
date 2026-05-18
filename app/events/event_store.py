@@ -74,11 +74,12 @@ class EventStore:
             trade_id = correlation_id or event.get('payload', {}).get('trade_id')
             
             # Create order event record
+            # FIXED: Pass dict directly to SQLAlchemy JSON column (not json.dumps string)
             order_event = OrderEvents(
                 id=self._generate_id(),
                 trade_id=trade_id,
                 event_type=event_type,
-                payload=json.dumps(event),
+                payload=event,  # Pass dict - SQLAlchemy handles JSON serialization
                 created_at=datetime.utcnow().isoformat()
             )
             

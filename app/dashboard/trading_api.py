@@ -323,6 +323,14 @@ async def execute_gold_dual_trade(
         print(f"   Strategy: {proposal.get('strategy_name')}")
         print(f"   Confidence: {proposal.get('confidence')*100:.1f}%")
         
+        # Fetch account balance for risk validation
+        try:
+            balance = await service.exchange_manager.fetch_balance()
+            account_balance = balance.get('total_usdt') if balance else None
+        except Exception as e:
+            logger.warning(f"Could not fetch balance for validation: {e}")
+            account_balance = None
+        
         # Additional validation at API level before dual execution
         from app.infra.trade_validator import TradeValidator
         validator = TradeValidator()
@@ -331,7 +339,8 @@ async def execute_gold_dual_trade(
             user_id=user_id,
             db_session=db_session,
             exchange="mexc",
-            symbol=settings.GOLD_SYMBOL_MEXC
+            symbol=settings.GOLD_SYMBOL_MEXC,
+            account_balance=account_balance
         )
         
         # Send Telegram validation report

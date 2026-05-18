@@ -458,24 +458,28 @@ class ExecutionService:
                     await db_session.flush()
                 
                 logger.info(f"Order placed successfully: {order_result.get('order_id')}")
-                await event_store.persist_event(
-                    {
-                        'type': 'ORDER_SUBMITTED',
-                        'payload': {
-                            'proposal_id': proposal_id,
-                            'symbol': request.symbol,
-                            'side': request.side.upper(),
-                            'quantity': request.quantity,
-                            'leverage': request.leverage,
-                            'order_id': order_result.get('order_id'),
-                            'filled_price': order_result.get('price') or request.entry_price,
-                            'filled_quantity': order_result.get('filled', request.quantity),
-                            'timestamp': datetime.utcnow().isoformat()
-                        }
-                    },
-                    db_session,
-                    correlation_id=str(proposal_id)
-                )
+                # FIXED: Wrap event persistence in try/catch to prevent trade failures
+                try:
+                    await event_store.persist_event(
+                        {
+                            'type': 'ORDER_SUBMITTED',
+                            'payload': {
+                                'proposal_id': proposal_id,
+                                'symbol': request.symbol,
+                                'side': request.side.upper(),
+                                'quantity': request.quantity,
+                                'leverage': request.leverage,
+                                'order_id': order_result.get('order_id'),
+                                'filled_price': order_result.get('price') or request.entry_price,
+                                'filled_quantity': order_result.get('filled', request.quantity),
+                                'timestamp': datetime.utcnow().isoformat()
+                            }
+                        },
+                        db_session,
+                        correlation_id=str(proposal_id)
+                    )
+                except Exception as event_error:
+                    logger.error(f"Event persistence failed (continuing trade execution): {event_error}")
                 return ExecutionResult(
                     success=True,
                     order_id=order_result.get('order_id'),

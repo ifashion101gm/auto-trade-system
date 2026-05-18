@@ -3,7 +3,7 @@ SQLAlchemy ORM models for the Auto Trade System.
 Aligned with migrations/versions/001_initial_schema.py
 """
 from enum import Enum
-from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Index, DateTime, func
+from sqlalchemy import Column, Integer, String, Float, Text, ForeignKey, Index, DateTime, func, JSON
 from app.database.connection import Base
 
 
@@ -406,7 +406,7 @@ class OrderEvents(Base):
     id = Column(String(36), primary_key=True)
     trade_id = Column(String(36), nullable=True)
     event_type = Column(String(50), nullable=False)
-    payload = Column(Text, nullable=False)  # JSON string
+    payload = Column(JSON, nullable=False)  # FIXED: Changed from Text to JSON to match DB schema
     created_at = Column(Text, nullable=False)
 
     __table_args__ = (
